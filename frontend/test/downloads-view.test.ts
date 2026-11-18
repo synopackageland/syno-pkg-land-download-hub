@@ -1,0 +1,63 @@
+import {expect,test} from 'vitest'
+import {copyableLink,createSampler,fileKind,groupRows,liveSummary,methodKey,sourceHost,sparkline,taskGroup,tileLabel} from '../src/downloads-view'
+test('tasks group by state; a manual pause or a pending pause is never failed',()=>{
+ expect(taskGroup({status:'running'})).toBe('active')
+ expect(taskGroup({status:'preparing'})).toBe('active')
+ expect(taskGroup({status:'pause'})).toBe('paused')
+ expect(taskGroup({status:'running',publication:{manualPaused:true,error:'EXECUTOR_PAUSED'}})).toBe('paused')
+ expect(taskGroup({status:'error'})).toBe('failed')
+ expect(taskGroup({status:'done',publication:{error:'WRITE_FAILED'}})).toBe('failed')
+ expect(taskGroup({status:'done',publication:{error:'CANCEL_REQUESTED'}})).toBe('done')
+ expect(taskGroup({status:'done',publication:{published:true}})).toBe('done')
+})
+test('a finished download still saving sits with the downloads, so Pause all and Resume all reach it',()=>{
+ expect(taskGroup({status:'done',publication:{state:'copying'}})).toBe('active')
+ expect(taskGroup({status:'done',publication:{state:'pending'}})).toBe('active')
+ expect(taskGroup({status:'done',publication:{state:'copying',manualPaused:true,error:'EXECUTOR_PAUSED'}})).toBe('paused')
+ expect(taskGroup({status:'done',publication:{state:'copying',error:'CANCEL_REQUESTED'}})).toBe('done')
+ expect(taskGroup({status:'done',publication:{state:'canceled'}})).toBe('done')
+ expect(taskGroup({status:'done'})).toBe('done')
+})
+test('groups keep page order, drop empty ones and show the latest completed first',()=>{
+ const rows=[{id:'a',group:'done' as const,completed:1},{id:'b',group:'active' as const},{id:'c',group:'done' as const,completed:5},{id:'d',group:'failed' as const}]
+ expect(groupRows(rows).map(g=>[g.key,g.rows.map(r=>r.id)])).toEqual([['active',['b']],['failed',['d']],['done',['c','a']]])
+})
+test('the tile shows the file kind from its name, else the method',()=>{
+ expect(fileKind('Movie.MKV')).toBe('video')
+ expect(fileKind('photo.jpeg')).toBe('image')
+ expect(fileKind('notes.md')).toBe('text')
+ expect(fileKind('page.html')).toBe('web')
+ expect(fileKind('ubuntu.iso')).toBe('disc')
+ expect(fileKind('clip.ts','media')).toBe('video')
+ expect(fileKind('Some talk','media')).toBe('video')
+ expect(fileKind('ubuntu','bt')).toBe('torrent')
+ expect(fileKind('noext')).toBe('file')
+ expect(tileLabel('a.tar.gz')).toBe('GZ')
+ expect(tileLabel('ubuntu','bt')).toBe('BT')
+ expect(tileLabel('noext')).toBe('')
+})
+test('the meta line names the host and method; links without a host name none',()=>{
+ expect(sourceHost('https://www.example.com/a.zip')).toBe('example.com')
+ expect(sourceHost('magnet:?xt=urn:btih:abc')).toBe('')
+ expect(sourceHost('')).toBe('')
+ expect(methodKey('bt')).toBe('downloads.method.bt')
+ expect(methodKey('media')).toBe('downloads.method.media')
+ expect(methodKey(undefined)).toBe('downloads.method.http')
+})
+test('only a link the owner gave can be copied; a search download has none',()=>{
+ expect(copyableLink({meta:{req:{url:'https://example.com/a.zip'}}})).toBe('https://example.com/a.zip')
+ expect(copyableLink({meta:{req:{url:'magnet:?xt=urn:btih:abc'}}})).toBe('magnet:?xt=urn:btih:abc')
+ expect(copyableLink({meta:{}})).toBe('')
+ expect(copyableLink({meta:{req:{url:'data:application/x-bittorrent;base64,ZA=='}}})).toBe('')
+})
+test('the header summary counts downloading tasks and their speed',()=>{
+ expect(liveSummary([{group:'active',speed:100},{group:'active',speed:null},{group:'paused',speed:5}])).toEqual({downloading:2,speed:100})
+})
+test('the sampler keeps two minutes and reports its peak; the sparkline needs two points',()=>{
+ const s=createSampler(120_000)
+ s.add(0,10);expect(sparkline(s.points,100,20)).toBe('')
+ s.add(60_000,40);s.add(120_000,20)
+ expect(s.points.map(p=>p.v)).toEqual([40,20])
+ expect(s.peak).toBe(40)
+ expect(sparkline(s.points,100,20)).toBe('50,2 100,11')
+})

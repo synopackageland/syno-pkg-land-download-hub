@@ -1,0 +1,52 @@
+// Local fixture only. Run in the Linux frontend gate image, never against DSM.
+import assert from 'node:assert/strict';
+import {mkdir,writeFile} from 'node:fs/promises';
+import {resolve,join} from 'node:path';
+import {createServer} from '../frontend/node_modules/vite/dist/node/index.js';
+import {chromium} from 'playwright';
+const out=process.env.BROWSER_ARTIFACTS??resolve('.cache/search-browser');
+await mkdir(out,{recursive:true});
+const server=await createServer({root:resolve('frontend'),configFile:resolve('frontend/vite.config.ts'),server:{host:'127.0.0.1',port:18765,strictPort:true}});
+await server.listen();
+const browser=await chromium.launch({executablePath:process.env.CHROME??'/usr/bin/chromium',args:['--no-sandbox','--disable-dev-shm-usage']});
+const page=await browser.newPage({viewport:{width:700,height:800}});
+const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+try{
+ await page.goto('http://127.0.0.1:18765/test/preview.html?search-errors');
+ await page.getByRole('button',{name:'Search',exact:true}).first().click();
+ await page.locator('[data-search-query] input').fill('ubuntu');
+ await page.locator('button[data-search-submit]').click();
+ await page.locator('[data-search-grid] tbody tr').first().waitFor();
+ const count=await page.locator('[data-search-grid] tbody tr').count();
+ assert.ok(count>0);
+ assert.ok((await page.locator('[data-search-statuses]').textContent()).includes('Searching'));
+ await page.screenshot({path:join(out,'search-700-pending.png')});
+ await page.getByRole('button',{name:'Downloads',exact:true}).first().click();
+ await page.getByRole('button',{name:'Search',exact:true}).first().click();
+ await page.waitForFunction(()=>window.fixture.calls.filter(x=>x.method==='search.jobs.pages').length>=2);
+ assert.equal(await page.locator('[data-search-grid] tbody tr').count(),count,'reattachment duplicated results');
+ assert.equal(await page.evaluate(()=>window.fixture.calls.filter(x=>x.method==='search.jobs.start').length),1,'reattachment resubmitted');
+ await page.evaluate(()=>window.releaseSearch());
+ await page.waitForFunction(()=>!document.querySelector('[data-search-statuses]')?.textContent?.includes('Searching'));
+ await page.setViewportSize({width:1440,height:900});
+ await page.screenshot({path:join(out,'search-1440-complete.png')});
+ const legacy=await page.evaluate(()=>window.fixture.calls.filter(x=>['search.stream','search.query','search.batch','search.sources.test','search.sources.unlock','search.sources.clearance.test'].includes(x.method)));
+ assert.deepEqual(legacy,[]);
+ // A second long search is canceled through the actual component action.
+ await page.locator('button[data-search-submit]').click();
+ await page.getByRole('button',{name:'Cancel',exact:true}).click();
+ await page.waitForFunction(()=>window.fixture.calls.some(x=>x.method==='search.jobs.cancel'));
+ await page.getByRole('button',{name:'Settings',exact:true}).first().click();
+ await page.evaluate(()=>{const x=window.fixture.search.sources[0];Object.assign(x,{cloudflare:true})});
+ await page.getByRole('button',{name:'Reload',exact:true}).last().click();
+ await page.locator('[data-cloudflare-unlock]').first().click();
+ await page.locator('[data-clearance-cookie] input').fill('cf_clearance=browser-fixture-clearance');
+ await page.getByRole('button',{name:'Save and test',exact:true}).click();
+ await page.locator('[data-cloudflare-dialog]').getByText('Unlocked',{exact:false}).first().waitFor();
+ await page.screenshot({path:join(out,'clearance-1440-complete.png')});
+ assert.ok(await page.evaluate(()=>window.fixture.calls.some(x=>x.method==='search.sources.unlock.start')));
+ assert.deepEqual(errors,[]);
+ const evidence={ok:true,viewports:[700,1440],partialRows:count,legacyRequests:legacy,pageErrors:errors,scenarios:['partial results','navigate and reconnect by original id','no duplicate rows or starts','completed results','explicit cancellation','asynchronous clearance save-and-test']};
+ await writeFile(join(out,'browser-evidence.json'),JSON.stringify(evidence,null,2)+'\n');
+ console.log(JSON.stringify(evidence));
+}finally{await browser.close();await server.close()}

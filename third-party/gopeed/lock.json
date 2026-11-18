@@ -1,0 +1,17 @@
+{
+  "version": "1.9.3",
+  "source": {
+    "url": "https://codeload.github.com/GopeedLab/gopeed/tar.gz/refs/tags/v1.9.3",
+    "sha256": "da8da9516fbe2a01db1dab11dda97c7e3096e43a14a7c13202a2f92976aa6db9"
+  },
+  "assets": {
+    "x86_64": {
+      "url": "https://github.com/GopeedLab/gopeed/releases/download/v1.9.3/gopeed-web-v1.9.3-linux-amd64.zip",
+      "sha256": "52444c86ffb5152c89d1c3a3b074285c4ef6dd3dabc9d4ae097cc703e0fa3e15"
+    },
+    "aarch64": {
+      "url": "https://github.com/GopeedLab/gopeed/releases/download/v1.9.3/gopeed-web-v1.9.3-linux-arm64.zip",
+      "sha256": "7921a5a67ebda725b99074122c7b4f0e19fcf36c26c7349f369bdb3ab584acc9"
+    }
+  }
+}

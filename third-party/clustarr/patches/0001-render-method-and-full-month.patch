@@ -1,0 +1,16 @@
+--- a/pkg/cardigann/filters.go
++++ b/pkg/cardigann/filters.go
+@@ -406 +406,3 @@
+-			case length >= 3:
++			case length >= 4:
++				b.WriteString("January")
++			case length == 3:
+--- a/pkg/cardigann/search.go
++++ b/pkg/cardigann/search.go
+@@ -687 +687,5 @@
+-	method := strings.ToUpper(p.Method)
++	method, err := render(p.Method, tc)
++	if err != nil {
++		return nil, err
++	}
++	method = strings.ToUpper(strings.TrimSpace(method))

@@ -1,0 +1,130 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Gopeed local fixture</title><style>html,body{margin:0;height:100%;background:#e4e8ec}#app{height:100%}body.two{display:flex;gap:8px}body.two>div{width:50%;height:100%}</style></head><body><div id="app"></div><script type="module">
+import {mount} from '../src/main.ts'
+import {mockHost} from './mock-host.ts'
+const params=new URL(location.href).searchParams
+// ?rto-ready answers RTO's public page messages as an installed, allowed extension.
+if(params.has('rto-ready'))window.addEventListener('message',e=>{const d=e.data;if(e.source!==window||d?.origin!=='rto-page')return;const data=d.type==='detect'?{version:'8.6.0'}:d.type==='listTabs'?{tabs:[]}:{};window.postMessage({origin:'rto-extension',requestId:d.requestId,ok:true,data},location.origin)})
+const fixture=mockHost(params.get('admin')!=='false',params.get('user')||undefined,!params.has('denied'));fixture.ctx.locale=params.get('locale')||'en'
+// Local-only destination/gallery fixtures for interaction and screenshot evidence.
+if(params.has('download-folders')){
+ const base=fixture.ctx.call;let chosen=!params.has('first-folder'),subfolder=chosen?'Downloads':'Downloads'
+ const current=()=>({key:'save',status:chosen?'active':'missing',subfolder,selection:{scope:'home',root:'/home',generation:1},destination:chosen?{id:'fixture-home',key:'save',path:'/home',username:fixture.ctx.user.name,lifetime:'until-revoked'}:null})
+ fixture.ctx.call=async(method,p={})=>{
+  if(method==='downloads.location'){fixture.calls.push({method,params:p});return current()}
+  if(method==='downloads.folder.set'){fixture.calls.push({method,params:p});chosen=true;subfolder=p.subfolder;return current()}
+  if(method==='media.tools.status'){fixture.calls.push({method,params:p});return {state:{tools:{}},pending:false,arch:params.get('arch')||'amd64'}}
+  if(method==='media.settings.get'){const value=await base(method,p);return {...value,rules:[{id:'fixture-rule',host:'gallery.example',path:'Pictures/Art',options:{format:'best'}}],follows:[{id:'fixture-follow',url:'https://video.example/channel',path:'Videos/YouTube/Channel',intervalHours:6,nextCheck:'2026-11-05T12:00:00Z'}]}}
+  return base(method,p)
+ }
+ const originalWebApi=fixture.ctx.webApi
+ fixture.ctx.webApi=async(api,method,version,p)=>{
+  if(api==='SYNO.Core.User.Home')return {enable:!params.has('home-off'),enable_domain:!params.has('home-off'),enable_ldap:!params.has('home-off')}
+  if(api==='SYNO.FileStation.List'&&method==='list_share')return {shares:params.has('home-off')?[]:[{name:'home',path:'/home',isdir:true}],offset:0,total:params.has('home-off')?0:1}
+  return originalWebApi(api,method,version,p)
+ }
+}
+if(params.has('incomplete')){const task=fixture.tasks.find(t=>t.id==='pending');task.meta.opts.name='Delayed body.bin';task.publication={delegated:true,published:false,error:'download_incomplete',state:'download_failed'}}
+if(params.has('save-denied')){const task=fixture.tasks.find(t=>t.id==='pending');task.meta.opts.name='Revoked access.bin';task.publication={delegated:true,published:false,error:params.get('save-denied'),state:'access_denied',uncertain:false}}
+if(params.has('admission')){const task=fixture.tasks.find(t=>t.id==='pending');task.meta.opts.name='Recoverable save.bin';task.publication={delegated:true,published:false,error:params.get('admission'),state:params.get('admission')==='ADMISSION_EXHAUSTED'?'save_failed':'pending',uncertain:false}}
+if(params.has('delete-fixture')){
+ fixture.tasks.splice(0,fixture.tasks.length,{id:'d1-copying',status:'done',meta:{opts:{name:'Copying download.bin',path:'/home/Downloads'},res:{size:4096}},publication:{delegated:true,state:'copying',published:false}})
+ const original=fixture.ctx.call;const removals=[]
+ fixture.ctx.call=async(method,p={})=>{
+  if(method==='gopeed.request'&&p.method==='DELETE'){
+   fixture.calls.push({method,params:p});fixture.tasks[0].publication={...fixture.tasks[0].publication,state:'canceling',deleting:true};return {code:0,data:{deleting:true,fileKept:false}}
+  }
+  if(method==='gopeed.request'&&p.path==='/api/v1/removals')return {code:0,data:removals}
+  return original(method,p)
+ }
+ window.completeDeletion=(kept)=>{fixture.tasks.splice(0);removals.push({id:'d1-copying',filename:'Copying download.bin',fileKept:kept})}
+}
+if(params.has('scope-fixture')){
+ const originalCall=fixture.ctx.call;let selected='home',generation=1,finish;let authorizations=0,engineBusy=false
+ fixture.ctx.executor.authorize=async(_password,scope)=>{
+  authorizations++;engineBusy=true
+  if(params.has('scope-requested')){finish=()=>{selected=scope;generation++;engineBusy=false};return {state:'blocked',reason:'selection-readback-timeout',requested:{scope,generation}}}
+  await new Promise(resolve=>finish=resolve);selected=scope;generation++;engineBusy=false;return {state:'ready'}
+ }
+ const originalStatus=fixture.ctx.executor.status
+ fixture.ctx.executor.status=async()=>{if(engineBusy&&params.has('scope-requested'))throw {code:'EXECUTOR_PAUSED'};return originalStatus()}
+ fixture.ctx.call=async(method,p={})=>{
+  if(method==='gopeed.request'&&p.path==='/api/v1/tasks'&&engineBusy)throw {code:'engine_busy'}
+  if(method==='delegate.status')return {state:'ready',disabled:false,scope_mode:'install-selected',preselection:'home',selection:{scope:selected,root:selected==='home'?'/home':'/'+selected.slice(7),generation}}
+  if(generation>1&&method==='downloads.location')return {key:p.key,status:'reselection-required',destination:null,selection:{scope:selected,root:'/'+selected.slice(7),generation}}
+  if(generation>1&&method==='delegate.list')return {delegations:[]}
+  return originalCall(method,p)
+ }
+ window.finishScopeConfirmation=()=>finish()
+ window.scopeFixtureState=()=>({selected,generation,authorizations,engineBusy})
+}
+// ?list-fixture fills the list with 240 downloads of every state, many with
+// very long mixed CJK/English names, to check the grid's layout.
+if(params.has('list-fixture')){
+ const names=['【4K HDR】2026 年度旅遊紀錄片 Northern Lights over Lofoten Islands — Director’s Extended Cut 完整版 (Remastered, Dolby Vision, 多國語言字幕).mkv','Quarterly report Q3 季報.pdf','ubuntu-24.04.3-desktop-amd64.iso','超長檔名測試：這是一個非常非常非常長的中文檔案名稱，用來確認名稱欄不會擠壓其他欄位，也不會讓表頭一字一行換行 with English words mixed in.zip','Synology DSM 7.4 Developer Guide 開發者指南 v2.1 final FINAL (1).pdf','podcast-episode-128.mp3']
+ const states=[{status:'running',progress:0.42,speed:3_400_000},{status:'pause',progress:0.18},{status:'done',published:true},{status:'error'},{status:'wait'},{status:'done',pending:true}]
+ const base=Date.parse('2026-10-17T08:00:00Z')
+ fixture.tasks.splice(0,fixture.tasks.length,...Array.from({length:240},(_,i)=>{
+  const state=states[i%states.length],size=(i%7+1)*734_003_200,name=`${String(i+1).padStart(3,'0')} ${names[i%names.length]}`
+  return {id:'file-'+i,status:state.status,createdAt:new Date(base-i*3_600_000).toISOString(),updatedAt:new Date(base-i*3_600_000+1_800_000).toISOString(),
+   meta:{req:{url:`https://downloads.example.com/archive/${i}/${encodeURIComponent(name)}`},opts:{name,path:i%3?'/home/Downloads':'/video/紀錄片/2026 旅遊/Northern Lights'},res:{size}},
+   progress:{downloaded:state.status==='done'?size:Math.round(size*(state.progress||0)),speed:state.speed||0},
+   publication:state.published?{published:true,delegated:true,filename:name,folder:i%3?'/home/Downloads':'/video/紀錄片/2026 旅遊/Northern Lights'}:state.pending?{delegated:true,published:false,state:'pending'}:undefined}
+ }))
+}
+// ?search-errors adds a source for each kind of failure; one more source
+// answers only when window.releaseSearch() is called. ?no-sources leaves
+// the user without any.
+if(params.has('search-errors')){
+ const kinds={cf:['Cloudflare site','search_cloudflare'],net:['Slow mirror','search_network'],parse:['Changed site','search_parse'],empty:['Quiet feed','search_empty']}
+ for(const [id,[name,code]] of Object.entries(kinds)){fixture.search.sources.push({id,kind:'builtin',name,enabled:true,configured:false,supported:true,reasons:[],settings:[]});fixture.search.errors[id]=code}
+ fixture.search.sources.push({id:'videos',kind:'ytsearch',name:'YouTube',enabled:true,configured:false,supported:true,reasons:[],settings:[]});fixture.search.hold.add('videos')
+ window.releaseSearch=()=>fixture.search.slow.videos?.()
+}
+if(params.has('no-sources'))fixture.search.sources.splice(0)
+// ?github-limit makes core checks hit GitHub's anonymous limit.
+if(params.has('github-limit')){const original=fixture.ctx.call;fixture.ctx.call=async(method,p={})=>{if(method==='binaries.check')throw {code:'tool_source_rate_limited',message:'GitHub rate limit reached; it resets at 2026-10-14T02:03:02Z. Add a GitHub token in Settings > GitHub to raise the limit'};return original(method,p)}}
+// ?full-page mounts the App as a Portal/standalone launch does: like DSM's own
+// page, this one declares no viewport, and the App adds a device-width one.
+// window.refuse(code) makes every engine read refuse with code; '' answers again.
+{const original=fixture.ctx.call;let refusal='';window.refuse=code=>{refusal=code};fixture.ctx.call=async(method,p={})=>{if(refusal&&method==='gopeed.request')throw {code:refusal};return original(method,p)}}
+// ?icon= stands in for the package icon URL the DSM window passes.
+if(params.has('full-page')){fixture.ctx.fullPage=true;fixture.ctx.appIcon=params.get('icon')||undefined}
+// The DSM window and SDK dialogs publish status on the same executor access.
+if(params.has('lifecycle-fixture')){
+ let current={state:'ready'};const listeners=[]
+ fixture.ctx.executor.subscribe=listener=>listeners.push(listener)
+ fixture.ctx.executor.status=async()=>current
+ window.executorStatus=status=>{current=status;listeners.forEach(listener=>listener(status))}
+}
+// ?empty starts with no downloads; ?phone-fixture lists one download of each
+// state with real-looking names, sizes and speeds; ?browser-sources adds
+// search sources that answer only through Remote Tab Opener.
+if(params.has('empty'))fixture.tasks.splice(0)
+if(params.has('phone-fixture')){
+ const now=Date.now(),iso=ms=>new Date(ms).toISOString()
+ fixture.tasks.splice(0,fixture.tasks.length,
+  {id:'ubuntu',status:'running',createdAt:iso(now-600_000),meta:{req:{url:'https://releases.ubuntu.com/24.04/ubuntu-24.04.3-desktop-amd64.iso'},opts:{name:'ubuntu-24.04.3-desktop-amd64.iso',path:'/home/Downloads'},res:{size:6_203_355_136}},progress:{downloaded:2_605_408_157,speed:11_534_336}},
+  {id:'album',protocol:'bt',status:'running',createdAt:iso(now-900_000),meta:{req:{url:'magnet:?xt=urn:btih:'+'c'.repeat(40)},opts:{name:'Creative Commons Album (FLAC)',path:'/home/Downloads'},res:{size:734_003_200,files:[{name:'01.flac',size:367_001_600},{name:'02.flac',size:367_001_600}]}},progress:{downloaded:183_500_800,speed:2_202_009}},
+  {id:'paused',status:'pause',createdAt:iso(now-3_600_000),meta:{req:{url:'https://cdimage.debian.org/debian-12.7.0-amd64-netinst.iso'},opts:{name:'debian-12.7.0-amd64-netinst.iso',path:'/home/Downloads'},res:{size:661_651_456}},progress:{downloaded:198_495_436}},
+  {id:'failed',status:'error',createdAt:iso(now-7_200_000),meta:{req:{url:'https://files.example.com/report-2026.pdf'},opts:{name:'report-2026.pdf',path:'/home/Downloads'}},progress:{downloaded:0}},
+  {id:'film',status:'done',createdAt:iso(now-86_400_000),updatedAt:iso(now-82_800_000),meta:{req:{url:'https://media.example.org/big-buck-bunny-1080p.mp4'},res:{size:725_106_140}},progress:{downloaded:725_106_140},publication:{published:true,delegated:true,filename:'big-buck-bunny-1080p.mp4',folder:'/home/Downloads'}},
+  {id:'manual',status:'done',createdAt:iso(now-172_800_000),updatedAt:iso(now-172_000_000),meta:{req:{url:'https://docs.example.com/manual.pdf'},res:{size:2_411_724}},progress:{downloaded:2_411_724},publication:{published:true,delegated:true,filename:'NAS user manual.pdf',folder:'/home/Downloads'}},
+ )
+ // A link added here becomes a running task, as the engine would make it.
+ const original=fixture.ctx.call;let n=0
+ fixture.ctx.call=async(method,p={})=>{
+  if(method!=='downloads.create_many')return original(method,p)
+  return {results:p.items.map(item=>{const id='added-'+(++n),name=decodeURIComponent(item.url.split(/[?#]/)[0].split('/').pop()||item.url)
+   fixture.tasks.push({id,status:'running',createdAt:new Date().toISOString(),meta:{req:{url:item.url},opts:{name,path:p.path},res:{size:1_073_741_824}},progress:{downloaded:8_388_608,speed:4_194_304}})
+   return {key:item.key,status:'created',kind:'file',ids:[id]}})}
+ }
+}
+if(params.has('browser-sources')){
+ fixture.search.sources.push(
+  {id:'kat',kind:'builtin',name:'Kickass Torrents',enabled:true,cloudflare:true,configured:false,supported:true,reasons:[],settings:[]},
+  {id:'1337x',kind:'builtin',name:'1337x',enabled:true,cloudflare:true,configured:false,supported:true,reasons:[],settings:[]})
+ fixture.search.errors.private=undefined
+}
+window.fixture=fixture;window.mounted=mount(document.getElementById('app'),fixture.ctx)
+if(params.has('two')){document.body.className='two';const root=document.createElement('div');document.body.append(root);window.second=mount(root,mockHost().ctx)}
+</script></body></html>

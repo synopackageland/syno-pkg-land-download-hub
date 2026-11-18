@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "target": "ES2024", "module": "NodeNext", "moduleResolution": "NodeNext",
+    "strict": true, "skipLibCheck": true, "noEmit": true, "noUnusedLocals": true,
+    "allowImportingTsExtensions": true, "types": ["node"]
+  },
+  "include": ["../../e2e.coverage.config.ts", "./*.ts", "../e2e/7*-real-*.ts", "../e2e/45-search.e2e.ts", "../e2e/support/*.ts"],
+  "exclude": ["../e2e/support/*.test.ts"]
+}

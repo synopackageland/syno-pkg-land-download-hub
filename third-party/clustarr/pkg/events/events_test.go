@@ -1,0 +1,652 @@
+/*
+Copyright 2026 The Clustarr Authors.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+package events_test
+
+import (
+	"errors"
+	"testing"
+	"time"
+
+	"k8s.io/apimachinery/pkg/types"
+
+	commonv1 "github.com/mediactl/clustarr/api/common/v1alpha1"
+	"github.com/mediactl/clustarr/pkg/events"
+)
+
+func TestDefaultTopologyIsValid(t *testing.T) {
+	if err := events.Default().Validate(); err != nil {
+		t.Fatalf("Default().Validate(): %v", err)
+	}
+	if err := events.Default().ForSingleNode().Validate(); err != nil {
+		t.Fatalf("ForSingleNode().Validate(): %v", err)
+	}
+}
+
+// TestEveryConsumerHasDeliveryHeadroom pins the invariant the spec calls out:
+// a consumer whose MaxDeliver equals the length of its backoff schedule burns
+// its last attempt on a delay it never uses.
+func TestEveryConsumerHasDeliveryHeadroom(t *testing.T) {
+	for _, c := range events.Default().Consumers {
+		if c.MaxDeliver <= len(c.BackOff) {
+			t.Errorf("consumer %s: MaxDeliver = %d, len(BackOff) = %d",
+				c.Name, c.MaxDeliver, len(c.BackOff))
+		}
+	}
+}
+
+func TestWorkStreamsAllowSchedules(t *testing.T) {
+	for _, s := range events.Default().Streams {
+		// The advisory stream is WorkQueue for its retention, not a work
+		// stream: only JetStream publishes to it, never with a schedule.
+		// The transcode stream uses DiscardNew, so it has no schedules.
+		if s.Retention != events.RetentionWorkQueue || s.Name == events.StreamAdvisories || s.Name == events.StreamWorkSquasharr {
+			continue
+		}
+		if !s.AllowMsgSchedules {
+			t.Errorf("work stream %s does not allow message schedules", s.Name)
+		}
+		if s.Discard == events.DiscardNew {
+			t.Errorf("work stream %s pairs schedules with DiscardNew, which "+
+				"nats-server refuses", s.Name)
+		}
+	}
+}
+
+// TestEveryWorkStreamHasAConsumer is the assertion that would have caught
+// CLUSTARR_WORK_IMPORTARR's absence from the other side: a work stream with
+// no consumer is work nobody drains, and `importarr --role worker` installed
+// a topology it could consume nothing from. Topology.Validate cannot check
+// this -- it only walks consumers towards streams, never the reverse.
+//
+// The advisory stream is the exception: natsbus creates its consumers, one
+// per watched durable, as each subscription starts.
+func TestEveryWorkStreamHasAConsumer(t *testing.T) {
+	top := events.Default()
+	for _, s := range top.Streams {
+		if s.Retention != events.RetentionWorkQueue || s.Name == events.StreamAdvisories {
+			continue
+		}
+		found := false
+		for _, c := range top.Consumers {
+			if c.Stream == s.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("work stream %s has no consumer: nothing drains it", s.Name)
+		}
+	}
+}
+
+// TestImportarrWorkTopology pins amendment §A1.6 verbatim: the stream, its
+// work-queue retention, and the three subjects its workers consume.
+func TestImportarrWorkTopology(t *testing.T) {
+	top := events.Default()
+
+	stream, ok := top.Stream(events.StreamWorkImportarr)
+	if !ok {
+		t.Fatalf("%s is missing from the default topology", events.StreamWorkImportarr)
+	}
+	if stream.Retention != events.RetentionWorkQueue {
+		t.Errorf("%s retention = %q, want %q (§A1.6)",
+			stream.Name, stream.Retention, events.RetentionWorkQueue)
+	}
+	if !stream.AllowMsgSchedules {
+		t.Errorf("%s does not allow message schedules", stream.Name)
+	}
+
+	// Each builder's output must land in this stream and match exactly the
+	// consumer that is meant to drain it. Building the subject rather than
+	// restating it means the test breaks if a builder changes shape.
+	cases := []struct {
+		subject  string
+		consumer string
+	}{
+		{events.WorkScanSubject("movies"), events.ConsumerImportScan},
+		{events.WorkListSubject("trakt-watchlist"), events.ConsumerImportList},
+		{events.WorkFileImportSubject("9f1c0d7e"), events.ConsumerImportFile},
+	}
+	for _, tc := range cases {
+		got, ok := top.StreamForSubject(tc.subject)
+		if !ok || got.Name != events.StreamWorkImportarr {
+			t.Errorf("%s routes to %v (found=%v), want %s",
+				tc.subject, got.Name, ok, events.StreamWorkImportarr)
+		}
+		c, ok := top.Consumer(tc.consumer)
+		if !ok {
+			t.Errorf("consumer %s is missing", tc.consumer)
+			continue
+		}
+		if c.Stream != events.StreamWorkImportarr {
+			t.Errorf("consumer %s reads %s, want %s", c.Name, c.Stream, events.StreamWorkImportarr)
+		}
+		matched := false
+		for _, f := range c.Filters {
+			if events.SubjectMatches(f, tc.subject) {
+				matched = true
+			}
+		}
+		if !matched {
+			t.Errorf("consumer %s does not match %s (filters %v)", c.Name, tc.subject, c.Filters)
+		}
+		// A scheduled publish must stay inside the stream and miss every
+		// consumer filter; the importarr subjects carry no priority token,
+		// so this is worth pinning for them specifically.
+		sched, err := events.ScheduleSubject(tc.subject)
+		if err != nil {
+			t.Errorf("ScheduleSubject(%s): %v", tc.subject, err)
+			continue
+		}
+		if s, ok := top.StreamForSubject(sched); !ok || s.Name != events.StreamWorkImportarr {
+			t.Errorf("scheduled %s leaves the stream", sched)
+		}
+		for _, f := range c.Filters {
+			if events.SubjectMatches(f, sched) {
+				t.Errorf("scheduled %s matches consumer filter %s and would re-trigger itself", sched, f)
+			}
+		}
+	}
+}
+
+func TestTopologyValidateCatchesBadConsumer(t *testing.T) {
+	top := events.Default()
+	top.Consumers = append(top.Consumers, events.ConsumerSpec{
+		Name:       "broken",
+		Stream:     events.StreamWorkCatalogarr,
+		Filters:    []string{events.FilterCatalogGrab},
+		MaxDeliver: 2,
+		BackOff:    []time.Duration{time.Second, time.Second},
+	})
+	if err := top.Validate(); err == nil {
+		t.Fatal("Validate accepted MaxDeliver == len(BackOff)")
+	}
+
+	top = events.Default()
+	top.Consumers = append(top.Consumers, events.ConsumerSpec{
+		Name:       "stray",
+		Stream:     events.StreamWorkIndexarr,
+		Filters:    []string{events.FilterCatalogGrab},
+		MaxDeliver: 3,
+	})
+	if err := top.Validate(); err == nil {
+		t.Fatal("Validate accepted a filter outside its stream")
+	}
+
+	top = events.Default()
+	top.Streams = nil
+	if err := top.Validate(); err == nil {
+		t.Fatal("Validate accepted a topology without the dead-letter stream")
+	}
+}
+
+func TestStreamForSubject(t *testing.T) {
+	top := events.Default()
+	cases := map[string]string{
+		events.CatalogItemSubject("movie", events.ActionAdded, "u"): events.StreamEvents,
+		events.ReleaseSubject("torrent", "nzb-su", 2000):            events.StreamReleases,
+		events.WorkSearchSubject(events.PriorityHigh, "m1"):         events.StreamWorkCatalogarr,
+		events.WorkRSSSubject("idx"):                                events.StreamWorkIndexarr,
+		events.WorkFetchSubject(events.PriorityLow, "r", "en"):      events.StreamWorkCaptionarr,
+		events.DLQSubject("catalogarr", "import", "1"):              events.StreamDLQ,
+	}
+	for subject, want := range cases {
+		got, ok := top.StreamForSubject(subject)
+		if !ok {
+			t.Errorf("no stream for %q", subject)
+			continue
+		}
+		if got.Name != want {
+			t.Errorf("%q resolved to %s, want %s", subject, got.Name, want)
+		}
+	}
+	if _, ok := top.StreamForSubject("clustarr.progress.download.u1"); ok {
+		t.Error("progress subjects must not resolve to a stream; they are core NATS")
+	}
+}
+
+func TestSubjectMatches(t *testing.T) {
+	cases := []struct {
+		filter, subject string
+		want            bool
+	}{
+		{"clustarr.evt.>", "clustarr.evt.catalog.movie.added.u1", true},
+		{"clustarr.evt.>", "clustarr.rel.torrent.x.2000", false},
+		{"clustarr.work.catalogarr.search.high.>", "clustarr.work.catalogarr.search.high.m1", true},
+		{"clustarr.work.catalogarr.search.high.>", "clustarr.work.catalogarr.search.low.m1", false},
+		{"clustarr.work.catalogarr.*.normal.>", "clustarr.work.catalogarr.grab.normal.m1", true},
+		{"a.b", "a.b", true},
+		{"a.b", "a.b.c", false},
+		{"a.>", "a", false},
+	}
+	for _, c := range cases {
+		if got := events.SubjectMatches(c.filter, c.subject); got != c.want {
+			t.Errorf("SubjectMatches(%q, %q) = %v, want %v",
+				c.filter, c.subject, got, c.want)
+		}
+	}
+}
+
+// TestScheduleSubjectAvoidsConsumerFilters is the property the whole delayed
+// grab mechanism rests on: the holding subject must sit inside the work
+// stream yet match no consumer, or a scheduled task would be handled twice.
+func TestScheduleSubjectAvoidsConsumerFilters(t *testing.T) {
+	target := events.WorkGrabSubject("movie-1")
+	hold, err := events.ScheduleSubject(target)
+	if err != nil {
+		t.Fatalf("ScheduleSubject: %v", err)
+	}
+	if hold == target {
+		t.Fatal("the holding subject equals the target subject")
+	}
+	top := events.Default()
+	stream, ok := top.StreamForSubject(hold)
+	if !ok || stream.Name != events.StreamWorkCatalogarr {
+		t.Fatalf("holding subject %q resolved to %v/%v", hold, stream.Name, ok)
+	}
+	for _, c := range top.Consumers {
+		for _, f := range c.Filters {
+			if events.SubjectMatches(f, hold) {
+				t.Errorf("consumer %s filter %q matches the holding subject %q",
+					c.Name, f, hold)
+			}
+		}
+	}
+	if _, err := events.ScheduleSubject(
+		events.CatalogItemSubject("movie", events.ActionAdded, "u")); err == nil {
+		t.Error("ScheduleSubject accepted a non-work subject")
+	}
+}
+
+func TestEnvelopeHeaderRoundTrip(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	in := &events.Envelope{
+		ID:      "uid:3:search",
+		Type:    "catalog.search",
+		Schema:  "catalog.SearchTask.v1",
+		Source:  "catalogarr@1.2.3+abc",
+		Key:     "media/the-thing",
+		Time:    now,
+		Trace:   "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+		Headers: map[string]string{"X-Custom": "1"},
+		Data:    []byte(`{"a":1}`),
+	}
+	h := in.ToHeaders()
+	if h[events.HeaderContentType] != events.ContentTypeJSON {
+		t.Errorf("Content-Type = %q", h[events.HeaderContentType])
+	}
+	if h[events.HeaderMsgID] != in.ID {
+		t.Errorf("%s = %q", events.HeaderMsgID, h[events.HeaderMsgID])
+	}
+	out := events.EnvelopeFromHeaders(h, in.Data)
+	if out.ID != in.ID || out.Type != in.Type || out.Schema != in.Schema ||
+		out.Source != in.Source || out.Key != in.Key || out.Trace != in.Trace {
+		t.Errorf("round trip lost a field: %+v", out)
+	}
+	if !out.Time.Equal(in.Time) {
+		t.Errorf("Time = %s, want %s", out.Time, in.Time)
+	}
+	if out.Headers["X-Custom"] != "1" {
+		t.Errorf("custom headers = %v", out.Headers)
+	}
+	if _, ok := out.Headers[events.HeaderContentType]; ok {
+		t.Error("Content-Type leaked into the extra headers")
+	}
+}
+
+func TestEnvelopeCloneIsDeep(t *testing.T) {
+	in := &events.Envelope{
+		ID:      "a",
+		Headers: map[string]string{"k": "v"},
+		Data:    []byte("payload"),
+	}
+	out := in.Clone()
+	out.Headers["k"] = "changed"
+	out.Data[0] = 'X'
+	if in.Headers["k"] != "v" {
+		t.Error("Clone shared the headers map")
+	}
+	if string(in.Data) != "payload" {
+		t.Error("Clone shared the payload slice")
+	}
+}
+
+func TestSettle(t *testing.T) {
+	sub := events.Subscription{
+		MaxDeliver: 3,
+		Backoff:    []time.Duration{time.Second, 5 * time.Second},
+	}
+	if s := events.Settle(nil, 1, sub); s.Action != events.SettleAck {
+		t.Errorf("nil error settled as %q", s.Action)
+	}
+	if s := events.Settle(errors.New("boom"), 1, sub); s.Action != events.SettleNak ||
+		s.Delay != time.Second {
+		t.Errorf("first failure settled as %+v, want a 1s nak", s)
+	}
+	if s := events.Settle(errors.New("boom"), 2, sub); s.Delay != 5*time.Second {
+		t.Errorf("second failure delay = %s, want 5s", s.Delay)
+	}
+	if s := events.Settle(errors.New("boom"), 3, sub); s.Action != events.SettleTerm {
+		t.Errorf("last attempt settled as %q, want a term", s.Action)
+	}
+	if s := events.Settle(events.Discard("bad", nil), 1, sub); s.Action != events.SettleTerm ||
+		s.Reason != "bad" {
+		t.Errorf("discard settled as %+v", s)
+	}
+	if s := events.Settle(events.Retry(90*time.Second, nil), 1, sub); s.Delay != 90*time.Second {
+		t.Errorf("explicit retry delay = %s, want 90s", s.Delay)
+	}
+	// An unlimited consumer never dead-letters on attempt count alone.
+	if s := events.Settle(errors.New("boom"), 99, events.Subscription{}); s.Action != events.SettleNak {
+		t.Errorf("unlimited consumer settled as %q", s.Action)
+	}
+}
+
+func TestBackoffReusesLastEntry(t *testing.T) {
+	sched := []time.Duration{time.Second, time.Minute}
+	if got := events.Backoff(sched, 1); got != time.Second {
+		t.Errorf("attempt 1 = %s", got)
+	}
+	if got := events.Backoff(sched, 5); got != time.Minute {
+		t.Errorf("attempt 5 = %s, want the last entry", got)
+	}
+	if got := events.Backoff(nil, 1); got != events.DefaultBackoff {
+		t.Errorf("empty schedule = %s, want DefaultBackoff", got)
+	}
+}
+
+func TestMsgIDsAreDeterministic(t *testing.T) {
+	if got := events.MsgIDForObject("uid-1", 4, "search"); got != "uid-1:4:search" {
+		t.Errorf("MsgIDForObject = %q", got)
+	}
+	a := events.MsgIDForRelease("nzb.su", "guid-1")
+	if a != events.MsgIDForRelease("nzb.su", "guid-1") {
+		t.Error("MsgIDForRelease is not deterministic")
+	}
+	if a == events.MsgIDForRelease("nzb.su", "guid-2") {
+		t.Error("MsgIDForRelease collided on different GUIDs")
+	}
+	if got := events.MsgIDForSubtitle("r1", "en:hi", "h9", 3); got != "r1/en:hi/h9/3" {
+		t.Errorf("MsgIDForSubtitle = %q", got)
+	}
+	if got := events.MsgIDForForcedSubtitle("r1", "en:hi", "h9", 3); got != "r1/en:hi/h9/force-3" {
+		t.Errorf("MsgIDForForcedSubtitle = %q", got)
+	}
+	// A scheduled attempt and a forced search at the same number must never
+	// share an ID: either would absorb the other.
+	if events.MsgIDForSubtitle("r1", "en", "h9", 3) == events.MsgIDForForcedSubtitle("r1", "en", "h9", 3) {
+		t.Error("a scheduled and a forced subtitle task collided")
+	}
+}
+
+// TestSubjectTokensAreSanitised guards against a media key with a dot in it
+// silently widening a subject into extra tokens.
+func TestSubjectTokensAreSanitised(t *testing.T) {
+	got := events.WorkSearchSubject(events.PriorityHigh, "movie/the.thing 1982")
+	want := "clustarr.work.catalogarr.search.high.movie-the-thing-1982"
+	if got != want {
+		t.Errorf("WorkSearchSubject = %q, want %q", got, want)
+	}
+	// A KV key's "." separator is the builder's own; everything the CALLER
+	// supplies is escaped into [0-9A-Za-z-] by events.KVKeyToken, so a dot
+	// or a space in a media key can neither reach NATS illegally nor forge
+	// a segment boundary.
+	if got := events.LeaseKey("movie.the thing"); got != "grab.movie-2ethe-20thing" {
+		t.Errorf("LeaseKey = %q, want %q", got, "grab.movie-2ethe-20thing")
+	}
+}
+
+func TestSubscriptionValidate(t *testing.T) {
+	ok := events.Subscription{
+		Stream: events.StreamEvents, Durable: "d",
+		Filters:    []string{events.FilterAllEvents},
+		MaxDeliver: 3, Backoff: []time.Duration{time.Second},
+	}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid subscription rejected: %v", err)
+	}
+	bad := ok
+	bad.MaxDeliver = 1
+	if err := bad.Validate(); err == nil {
+		t.Error("Validate accepted MaxDeliver == len(Backoff)")
+	}
+	bad = ok
+	bad.Filters = nil
+	if err := bad.Validate(); err == nil {
+		t.Error("Validate accepted a subscription with no filters")
+	}
+}
+
+func TestConsumerSpecSubscription(t *testing.T) {
+	spec, ok := events.Default().Consumer(events.ConsumerImportFile)
+	if !ok {
+		t.Fatalf("consumer %s missing from the default topology",
+			events.ConsumerImportFile)
+	}
+	sub := spec.Subscription()
+	if sub.Durable != spec.Name || sub.Stream != spec.Stream {
+		t.Errorf("Subscription = %+v", sub)
+	}
+	if sub.MaxInFlight != spec.MaxAckPending {
+		t.Errorf("MaxInFlight = %d, want %d", sub.MaxInFlight, spec.MaxAckPending)
+	}
+	if err := sub.Validate(); err != nil {
+		t.Errorf("derived subscription is invalid: %v", err)
+	}
+}
+
+// TestKVBucketNamesHaveNoDots pins the NATS naming rule for buckets.
+func TestKVBucketNamesHaveNoDots(t *testing.T) {
+	for _, b := range events.Default().Buckets {
+		for _, r := range b.Name {
+			if r == '.' {
+				t.Errorf("bucket %q contains a dot", b.Name)
+			}
+		}
+		if b.LimitMarkerTTL <= 0 {
+			t.Errorf("bucket %q has no LimitMarkerTTL, so per-key TTL cannot work",
+				b.Name)
+		}
+	}
+}
+
+// TestDeadLetterSubjectNamesTheFailedTask pins the <service>.<task> tokens of
+// a dead letter's subject. A work subject names its own service and task. An
+// event or a release does not -- it names its producer's domain, and several
+// durables consume one event -- so those are named by the consuming durable:
+// catalogarr-redownload and catalogarr-history dead-lettering the same
+// Download failed event land on two subjects, not one shared
+// clustarr.dlq.download.download.<id>.
+func TestDeadLetterSubjectNamesTheFailedTask(t *testing.T) {
+	failed := events.DownloadEventSubject(events.ActionFailed, "dl-uid")
+	cases := []struct {
+		name, subject, durable, want string
+	}{
+		{
+			"work subject names itself", events.WorkSearchSubject(events.PriorityHigh, "m1"),
+			events.ConsumerCatalogSearchHigh, events.DLQSubject("catalogarr", "search", "id-1"),
+		},
+		{
+			"event, redownload consumer", failed,
+			events.ConsumerCatalogRedownload, events.DLQSubject("catalogarr", "redownload", "id-1"),
+		},
+		{
+			"same event, history consumer", failed,
+			events.ConsumerCatalogHistory, events.DLQSubject("catalogarr", "history", "id-1"),
+		},
+		{
+			"release, rss matcher", events.ReleaseSubject("torrent", "idx", 2000),
+			events.ConsumerCatalogRSSMatcher, events.DLQSubject("catalogarr", "rss-matcher", "id-1"),
+		},
+		{"durable without a task", failed, "loner", events.DLQSubject("loner", "unknown", "id-1")},
+		{"no durable", failed, "", events.DLQSubject("unknown", "unknown", "id-1")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, env := events.DeadLetterEnvelope(&events.Envelope{ID: "id-1"}, tc.subject, 3,
+				tc.durable, "boom")
+			if got != tc.want {
+				t.Errorf("DLQ subject = %q, want %q", got, tc.want)
+			}
+			if env.Headers[events.HeaderDLQSubject] != tc.subject {
+				t.Errorf("%s = %q, want the original %q", events.HeaderDLQSubject,
+					env.Headers[events.HeaderDLQSubject], tc.subject)
+			}
+		})
+	}
+}
+
+// TestArtworkKey pins the object name shape spec §B.2 gives: one poster
+// original's key, readable and stable.
+func TestArtworkKey(t *testing.T) {
+	uid := types.UID("8b2c1e3a-0000-0000-0000-000000000000")
+	got := events.ArtworkKey(commonv1.MediaKindMovie, uid, "poster", events.ArtworkVariantOriginal)
+	want := "movie/" + string(uid) + "/poster/original"
+	if got != want {
+		t.Errorf("ArtworkKey = %q, want %q", got, want)
+	}
+}
+
+// TestArtworkKeyPanicsOnBadPart guards the invariant the doc comment states:
+// an empty part or a part containing "/" would forge or erase a segment
+// boundary in the object name, so ArtworkKey panics rather than building a
+// key that silently collides with -- or is indistinguishable from -- another
+// item's.
+func TestArtworkKeyPanicsOnBadPart(t *testing.T) {
+	cases := []struct {
+		name                    string
+		kind                    commonv1.MediaKind
+		uid, imageType, variant string
+	}{
+		{"empty uid", commonv1.MediaKindMovie, "", "poster", events.ArtworkVariantOriginal},
+		{"empty image type", commonv1.MediaKindMovie, "u1", "", events.ArtworkVariantOriginal},
+		{"empty variant", commonv1.MediaKindMovie, "u1", "poster", ""},
+		{"slash in image type", commonv1.MediaKindMovie, "u1", "a/b", events.ArtworkVariantOriginal},
+		{"slash in uid", commonv1.MediaKindMovie, "a/b", "poster", events.ArtworkVariantOriginal},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("ArtworkKey(%q, %q, %q, %q) did not panic",
+						tc.kind, tc.uid, tc.imageType, tc.variant)
+				}
+			}()
+			events.ArtworkKey(tc.kind, types.UID(tc.uid), tc.imageType, tc.variant)
+		})
+	}
+}
+
+// TestArtworkWorkSubjectsResolveToCatalogarr proves the fetch and render
+// work subjects (spec §B.7, §C.6) land in CLUSTARR_WORK_CATALOGARR and are
+// picked up by their own durable and no other durable's filter, the same
+// property TestImportarrWorkTopology holds for the importarr subjects.
+func TestArtworkWorkSubjectsResolveToCatalogarr(t *testing.T) {
+	top := events.Default()
+	cases := []struct {
+		subject      string
+		consumer     string
+		otherFilters []string
+	}{
+		{
+			events.WorkArtworkFetchSubject("m1"), events.ConsumerCatalogArtworkFetch,
+			[]string{events.FilterCatalogArtworkRender},
+		},
+		{
+			events.WorkArtworkRenderSubject("m1"), events.ConsumerCatalogArtworkRender,
+			[]string{events.FilterCatalogArtworkFetch},
+		},
+	}
+	for _, tc := range cases {
+		got, ok := top.StreamForSubject(tc.subject)
+		if !ok || got.Name != events.StreamWorkCatalogarr {
+			t.Errorf("%s routes to %v (found=%v), want %s",
+				tc.subject, got.Name, ok, events.StreamWorkCatalogarr)
+		}
+		c, ok := top.Consumer(tc.consumer)
+		if !ok {
+			t.Fatalf("consumer %s is missing", tc.consumer)
+		}
+		if c.Stream != events.StreamWorkCatalogarr {
+			t.Errorf("consumer %s reads %s, want %s", c.Name, c.Stream, events.StreamWorkCatalogarr)
+		}
+		matched := false
+		for _, f := range c.Filters {
+			if events.SubjectMatches(f, tc.subject) {
+				matched = true
+			}
+		}
+		if !matched {
+			t.Errorf("consumer %s does not match %s (filters %v)", c.Name, tc.subject, c.Filters)
+		}
+		for _, f := range tc.otherFilters {
+			if events.SubjectMatches(f, tc.subject) {
+				t.Errorf("%s also matches the other consumer's filter %s", tc.subject, f)
+			}
+		}
+	}
+}
+
+// TestTopologyValidateRejectsDuplicateObjectStore mirrors
+// TestTopologyValidateCatchesBadConsumer for the new ObjectStores slice.
+func TestTopologyValidateRejectsDuplicateObjectStore(t *testing.T) {
+	top := events.Default()
+	top.ObjectStores = append(top.ObjectStores, top.ObjectStores[0])
+	if err := top.Validate(); err == nil {
+		t.Fatal("Validate accepted a duplicate object-store name")
+	}
+}
+
+// TestDefaultObjectStoreIsArtwork pins spec §B.2's artwork bucket, beside
+// segment detection's fingerprints (spec 2026-10-01).
+func TestDefaultObjectStoreIsArtwork(t *testing.T) {
+	top := events.Default()
+	names := map[string]events.ObjectStoreSpec{}
+	for _, o := range top.ObjectStores {
+		names[o.Name] = o
+	}
+	if len(names) != 2 {
+		t.Fatalf("ObjectStores = %+v, want artwork and fingerprints", top.ObjectStores)
+	}
+	if _, ok := names[events.ObjectStoreFingerprints]; !ok {
+		t.Errorf("no %s object store", events.ObjectStoreFingerprints)
+	}
+	o, ok := names[events.BucketArtwork]
+	if !ok {
+		t.Fatalf("no %s object store", events.BucketArtwork)
+	}
+	if o.Storage != events.StorageFile {
+		t.Errorf("Storage = %q, want %q", o.Storage, events.StorageFile)
+	}
+	if o.MaxBytes != events.ArtworkMaxBytes {
+		t.Errorf("MaxBytes = %d, want %d", o.MaxBytes, events.ArtworkMaxBytes)
+	}
+	if o.Replicas != 3 {
+		t.Errorf("Replicas = %d, want 3", o.Replicas)
+	}
+
+	// A single node keeps the object store on file storage: 5 GiB of
+	// artwork originals never fit config/nats' 256Mi max_memory_store, and
+	// every controller crash-looped on kind the first time it was memory
+	// (2026-09-24). Only the replica count drops.
+	for _, single := range top.ForSingleNode().ObjectStores {
+		if single.Replicas != 1 || single.Storage != events.StorageFile || single.MaxBytes != names[single.Name].MaxBytes {
+			t.Errorf("ForSingleNode object store = %+v, want replicas 1, file storage, %d bytes", single, names[single.Name].MaxBytes)
+		}
+	}
+}

@@ -1,0 +1,110 @@
+# Standalone native DSM package: an unsigned SPK that runs as its own package
+# `synopkgland build` reads this file.
+schema: 2
+
+# INFO.package: letters and digits, starting with a letter. It also names the
+# DSM app (SYNO.SDS.<package>) and the CGI URL /webman/3rdparty/<package>/.
+package: SynoPkgGopeed
+version: 0.2.2
+# Increase for every SPK you hand out with the same version (INFO 0.1.0-0001).
+build: 115
+displayname: Download Hub
+entry: app-privilege
+# Package Center and DSM window icons: upstream Gopeed's logo, rendered by
+# scripts/icons.py (see README).
+icon: assets/icon
+maintainer: Syno Package Land
+os_min_ver: "7.1-42661"
+# Package Center metadata (INFO spk_land_metadata). The package source serves
+# the GPL corresponding source of every build it offers at source_url.
+# Store text (descriptions and release notes) comes only from the catalog:
+# build with --catalog <catalog.yaml> or SYNOPKGLAND_CATALOG.
+metadata:
+  maintainer_url: https://synopkgland.com/
+  license: GPL-3.0-or-later
+  source_url: https://packages.synopkgland.com/src/synopackageland/syno-pkg-land-download-hub/
+
+# One SPK per architecture. Supported: x86_64, aarch64.
+arches: [x86_64, aarch64]
+
+backend:
+  kind: go
+  dir: backend
+  main: ./cmd/app
+
+ui:
+  # The SDK snapshots app.module.js, app.css and lazy chunks under one version.
+  dir: ui
+  build: {cwd: ., command: [python3, scripts/prepare.py]}
+
+mobile:
+  entry: app
+  start: /
+  capabilities: [download, open-external]
+  intake:
+    route: /add
+    accept:
+      - {kind: url, schemes: [http, https, magnet, ed2k]}
+      - {kind: text}
+      - {kind: file, types: [application/x-bittorrent, .torrent], max_bytes: 524288}
+  min_shell: 1
+
+# UI languages: i18n/messages/<locale>.json for en, zh-TW, zh-CN, ja, ko, de,
+# fr, es and it (DSM's other languages fall back to English). build checks
+# that every language has the en.json keys and placeholders, and that the keys
+# listed in the glossary use DSM's own wording.
+i18n:
+  messages: i18n/messages
+  glossary: i18n/glossary.json
+  # DSM main-menu/window title per language (INFO displayname_<lang>,
+  # ui/texts/<lang>/strings). English comes from displayname above; the
+  # descriptions come from the catalog. The App is Download Hub; Gopeed names
+  # only the bundled engine.
+  info:
+    zh-TW:
+      displayname: 下載中心
+    zh-CN:
+      displayname: 下载中心
+    ja:
+      displayname: ダウンロードハブ
+    ko:
+      displayname: 다운로드 허브
+    de:
+      displayname: Download Hub
+    fr:
+      displayname: Download Hub
+    es:
+      displayname: Download Hub
+    it:
+      displayname: Download Hub
+
+# Session files and SDK-approved permanent destinations.
+capabilities:
+  files: session
+  delegate:
+    scope: install-selected
+    operations: [files.moveFromStaging]
+    destinations: [save]
+    lifetime: until-revoked
+
+daemon:
+  exec: bin/engine
+  targets:
+    x86_64: build/daemon-x86_64
+    aarch64: build/daemon-aarch64
+  args: ["${SYNOPKG_PKGDEST}/daemon/payload", "${SYNOPKG_PKGVAR}"]
+  env: {}
+
+# DSM Application Portal: https://<nas>/download-hub/ opens the App full page
+# after DSM sign-in. Below DSM 7.2 the executor registers the entry; an
+# administrator enables it from Settings (see `synopkgland skill show portal`).
+portal: {alias: download-hub}
+
+# Explicit task commands only. Permissions come from the registered backend.
+ctl:
+  enabled: true
+  aliases:
+    - gopeed
+    - download-hub
+  developedBy: synopkgland
+  registry: operations.json

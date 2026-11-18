@@ -1,0 +1,324 @@
+/*
+Copyright 2026 The Clustarr Authors.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+package torznab
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strconv"
+	"time"
+
+	"github.com/mediactl/clustarr/pkg/obs/logging"
+	"github.com/mediactl/clustarr/pkg/obs/tracing"
+	"github.com/mediactl/clustarr/pkg/ratelimit"
+	"github.com/mediactl/clustarr/pkg/redact"
+)
+
+// defaultTimeout matches Indexer.spec.timeout's default in
+// api/index/v1alpha1.
+const defaultTimeout = 30 * time.Second
+
+// ClientOption configures a Client built by NewClient.
+type ClientOption func(*Client)
+
+// WithTimeout overrides the HTTP client's per-request timeout.
+func WithTimeout(d time.Duration) ClientOption {
+	return func(c *Client) { c.hc.Timeout = d }
+}
+
+// WithRateLimit makes the client wait on lim before every outbound request.
+// The caller owns the limiter: indexarr holds one per indexer host and
+// shares it across the caps probe, the search fan-out and the RSS poll, so
+// that all three respect one budget. lim is keyed internally by the
+// client's own baseURL host, so the same *ratelimit.Limiter can safely be
+// handed to several Clients for several different hosts as well -- each
+// draws from its own bucket.
+//
+// There is no default: a Client built without this option does not
+// rate-limit at all, because the caller owns pacing (see the package doc).
+// A library-side default would stack a second limiter in series underneath
+// the caller's own and silently change the effective rate.
+func WithRateLimit(lim *ratelimit.Limiter) ClientOption {
+	return func(c *Client) { c.limiter = lim }
+}
+
+// WithProxy routes every request through dial. It is a no-op -- fails
+// closed rather than panicking -- when the client's http.Client.Transport
+// (set by an earlier WithHTTPClient) is not an *http.Transport, since only
+// that concrete type exposes DialContext. NewClient's own default
+// constructs an *http.Transport explicitly, so this is never reached from
+// the default configuration.
+func WithProxy(dial func(ctx context.Context, network, addr string) (net.Conn, error)) ClientOption {
+	return func(c *Client) {
+		t, ok := c.hc.Transport.(*http.Transport)
+		if !ok {
+			return
+		}
+		clone := t.Clone()
+		clone.DialContext = dial
+		c.hc.Transport = clone
+	}
+}
+
+// WithHTTPClient replaces the underlying *http.Client outright.
+func WithHTTPClient(hc *http.Client) ClientOption {
+	return func(c *Client) { c.hc = hc }
+}
+
+// Client is a Torznab/Newznab HTTP client for one indexer host: context
+// aware, API-key authenticated, with an optional caller-supplied dial
+// function for proxying and an optional caller-supplied rate limiter
+// (WithRateLimit). It does not pace itself.
+type Client struct {
+	baseURL *url.URL
+	apikey  string
+	hc      *http.Client
+	limiter *ratelimit.Limiter
+}
+
+// NewClient builds a Client for baseURL, authenticated with apikey.
+func NewClient(baseURL, apikey string, opts ...ClientOption) (*Client, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("torznab: parse base URL %q: %w", redact.URL(baseURL), redact.Err(err))
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return nil, fmt.Errorf("torznab: base URL %q must be absolute", redact.URL(baseURL))
+	}
+
+	c := &Client{
+		baseURL: u,
+		apikey:  apikey,
+		hc: &http.Client{
+			Timeout:   defaultTimeout,
+			Transport: &http.Transport{},
+		},
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c, nil
+}
+
+// ErrPaced is a request the client's rate limiter could not send before its
+// context ran out: it was never sent, so it says nothing about the indexer.
+// It wraps the context's error, so errors.Is(err, context.DeadlineExceeded)
+// still holds.
+var ErrPaced = errors.New("torznab: no request slot before the deadline")
+
+// turnKey marks a context that already holds a request slot on the limiter,
+// for the host it names (WaitTurn).
+type turnKey struct{}
+
+// WaitTurn takes one request slot from the client's rate limiter, waiting
+// for it under ctx, and returns ctx marked as holding it: the next request
+// made under the returned context (or one derived from it) is sent without
+// waiting again. A caller that bounds a request with a timeout waits for its
+// turn first and starts the timeout on the returned context, so time spent
+// queued behind the client's own pacing never counts against the indexer's
+// timeout (2026-10-06: a 104-search sweep's queued nzbgeek queries timed out
+// before they were sent and disabled it). With no limiter it returns ctx.
+func (c *Client) WaitTurn(ctx context.Context) (context.Context, error) {
+	if c.limiter == nil {
+		return ctx, ctx.Err()
+	}
+	if err := c.limiter.Wait(ctx, c.baseURL.Host); err != nil {
+		return ctx, fmt.Errorf("%w: %w", ErrPaced, err)
+	}
+	return context.WithValue(ctx, turnKey{}, c.baseURL.Host), nil
+}
+
+// do rate-limits, traces and issues one GET request against c.baseURL with
+// values as its query string. The caller must close the returned
+// response's Body.
+func (c *Client) do(ctx context.Context, values url.Values) (*http.Response, error) {
+	ctx, span := tracing.Start(ctx, "torznab.request")
+	defer span.End()
+
+	logging.FromContext(ctx).Debug("torznab: request", "url", redact.URL(c.baseURL.String()), "t", values.Get("t"))
+
+	// An already-cancelled or expired context never issues a request; this
+	// is what makes cancellation propagate out of Search/Caps unwrapped.
+	// ratelimit.Limiter.Wait has the same property, so the check is the
+	// limiter's when the caller supplied one. The key is this client's own
+	// host, so a *ratelimit.Limiter shared across several Clients (one per
+	// indexer host, as indexarr does) still isolates unrelated hosts from
+	// each other while letting several Clients for the *same* host --
+	// caps probe, search fan-out, RSS poll -- draw on one bucket.
+	if host, _ := ctx.Value(turnKey{}).(string); c.limiter != nil && host != c.baseURL.Host {
+		if err := c.limiter.Wait(ctx, c.baseURL.Host); err != nil {
+			err = fmt.Errorf("%w: %w", ErrPaced, err)
+			tracing.RecordError(span, err)
+			return nil, err
+		}
+	} else if err := ctx.Err(); err != nil {
+		tracing.RecordError(span, err)
+		return nil, err
+	}
+
+	u := *c.baseURL
+	u.RawQuery = values.Encode()
+
+	// Both errors below are a *url.Error quoting the whole request URL,
+	// ?apikey= included, and they reach Indexer status conditions, Events,
+	// status.lastFailure and spans. redact.Err drops the query from it and
+	// keeps the *url.Error and its cause, so errors.Is(ctx errors) and
+	// net.Error's Timeout still work for every caller.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		err = redact.Err(err)
+		tracing.RecordError(span, err)
+		return nil, err
+	}
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		err = redact.Err(err)
+		tracing.RecordError(span, err)
+		return nil, err
+	}
+	return resp, nil
+}
+
+// maxResponseBodyBytes bounds how much of an indexer's response Client will
+// buffer into memory. Without a bound, one misbehaving (or malicious)
+// indexer's oversized response could exhaust memory in a fan-out search
+// across many indexers; 8 MiB comfortably covers a real caps/search
+// document with room to spare.
+const maxResponseBodyBytes = 8 << 20 // 8 MiB
+
+// ErrResponseTooLarge is returned by Client.Caps and Client.Search when an
+// indexer's response body exceeds maxResponseBodyBytes.
+var ErrResponseTooLarge = errors.New("torznab: response body exceeds size limit")
+
+// Caps fetches and parses t=caps.
+func (c *Client) Caps(ctx context.Context) (Caps, error) {
+	ctx, span := tracing.Start(ctx, "torznab.caps")
+	defer span.End()
+
+	v := url.Values{"t": {"caps"}}
+	if c.apikey != "" {
+		v.Set("apikey", c.apikey)
+	}
+
+	resp, err := c.do(ctx, v)
+	if err != nil {
+		tracing.RecordError(span, err)
+		return Caps{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := readOrError(resp)
+	if err != nil {
+		tracing.RecordError(span, err)
+		return Caps{}, err
+	}
+	return ParseCaps(bytes.NewReader(body))
+}
+
+// Search runs q and parses the resulting item feed.
+func (c *Client) Search(ctx context.Context, q Query) ([]Release, error) {
+	ctx, span := tracing.Start(ctx, "torznab.search")
+	defer span.End()
+
+	resp, err := c.do(ctx, q.Values(c.apikey))
+	if err != nil {
+		tracing.RecordError(span, err)
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := readOrError(resp)
+	if err != nil {
+		tracing.RecordError(span, err)
+		return nil, err
+	}
+	return ParseResults(bytes.NewReader(body))
+}
+
+// readOrError reads resp's body fully and, when resp represents a
+// Torznab/Newznab failure, returns that failure as *Error instead of the
+// body. A failure is either HTTP-level (410 disabled, 429 rate limited --
+// per §4.5 these never carry an XML body at all) or an XML <error> element
+// in the body itself, since Newznab conventionally answers every error with
+// plain HTTP 200 (§4.5). Any other non-2xx status with no <error> body
+// becomes a generic error. The read itself is capped at
+// maxResponseBodyBytes.
+func readOrError(resp *http.Response) ([]byte, error) {
+	if err := httpStatusError(resp); err != nil {
+		return nil, err
+	}
+
+	// Read one byte past the limit so a body that is exactly at the limit
+	// is accepted while anything larger is detected without ever buffering
+	// more than maxResponseBodyBytes+1 bytes.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxResponseBodyBytes {
+		return nil, fmt.Errorf("%w: at least %d bytes", ErrResponseTooLarge, len(body))
+	}
+
+	if e, perr := ParseError(bytes.NewReader(body)); perr == nil && e != nil {
+		e.HTTPStatus = resp.StatusCode
+		return nil, e
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("torznab: unexpected status %d", resp.StatusCode)
+	}
+
+	return body, nil
+}
+
+// httpStatusError maps the two HTTP-level failures that never carry an XML
+// body (Prowlarr's convention, §4.5/§6) to an *Error. Every other status,
+// including other non-2xx statuses, returns nil so the caller inspects the
+// body for a Newznab <error> element instead.
+func httpStatusError(resp *http.Response) error {
+	switch resp.StatusCode {
+	case http.StatusGone:
+		return &Error{HTTPStatus: http.StatusGone, Description: "indexer disabled"}
+	case http.StatusTooManyRequests:
+		return &Error{HTTPStatus: http.StatusTooManyRequests, Description: "rate limited", RetryAfter: retryAfter(resp)}
+	default:
+		return nil
+	}
+}
+
+// retryAfter parses the Retry-After header as a whole number of seconds,
+// returning 0 when it is absent or not a valid integer (Torznab/Newznab
+// never send the HTTP-date form of Retry-After).
+func retryAfter(resp *http.Response) time.Duration {
+	s := resp.Header.Get("Retry-After")
+	if s == "" {
+		return 0
+	}
+	secs, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
+}

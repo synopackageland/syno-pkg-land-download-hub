@@ -1,0 +1,42 @@
+--- a/pkg/cardigann/download.go
++++ b/pkg/cardigann/download.go
+@@ -223,2 +223,7 @@ func (e Engine) fetch(ctx context.Context, def *Definition, cfg Config, tc *Temp
+-	if err := renderHeaders(req, headers, tc); err != nil {
+-		return nil, err
++	// The definition's headers may carry credentials (an API key, a bearer
++	// token); like the session they go only to the site, never to another
++	// host a download selector pointed at.
++	if OnSite(cfg.BaseURL, req.URL) {
++		if err := renderHeaders(req, headers, tc); err != nil {
++			return nil, err
++		}
+--- a/pkg/cardigann/template.go
++++ b/pkg/cardigann/template.go
+@@ -21,0 +22 @@ import (
++	"errors"
+@@ -215 +216,4 @@ func renderModified(tmplText string, tc *TemplateContext, modifier func(string)
+-	if err := t.Execute(&buf, tc); err != nil {
++	if err := t.Execute(&cappedWriter{buf: &buf, max: maxTemplateOutput}, tc); err != nil {
++		if errors.Is(err, errTemplateOutputTooLarge) {
++			return "", errTemplateOutputTooLarge
++		}
+@@ -220,0 +225,19 @@ func renderModified(tmplText string, tc *TemplateContext, modifier func(string)
++// maxTemplateOutput bounds what one template may produce: a few bytes of
++// nested range or repeat actions can otherwise expand into gigabytes.
++const maxTemplateOutput = 1 << 20
++
++var errTemplateOutputTooLarge = errors.New("cardigann: template output too large")
++
++// cappedWriter fails a write that would take buf past max.
++type cappedWriter struct {
++	buf *bytes.Buffer
++	max int
++}
++
++func (w *cappedWriter) Write(p []byte) (int, error) {
++	if w.buf.Len()+len(p) > w.max {
++		return 0, errTemplateOutputTooLarge
++	}
++	return w.buf.Write(p)
++}
++

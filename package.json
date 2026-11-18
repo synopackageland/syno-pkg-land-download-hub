@@ -1,0 +1,36 @@
+{
+  "name": "syno-pkg-gopeed",
+  "version": "0.2.2",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "packageManager": "pnpm@12.8.1",
+  "scripts": {
+    "prepare:upstream": "python3 scripts/prepare.py",
+    "test": "bash scripts/test-internal-names.sh && bash scripts/check-internal-names.sh && python3 -m unittest discover -s scripts -p \"test_*.py\" && node --test tests/e2e/support/*.test.ts && pnpm run test:ctl && bash scripts/frontend-check.sh 'pnpm test' && bash scripts/search-check.sh && cd backend && go test ./... && go vet ./...",
+    "build": "python3 scripts/build.py",
+    "test:artifact": "python3 -m unittest discover -s tests -p \"test_*.py\"",
+    "check": "pnpm run ctl:check && pnpm test && pnpm run build && pnpm run test:artifact",
+    "e2e:nas": "node tests/e2e/nas.ts",
+    "e2e:coverage": "e2e run --config e2e.coverage.config.ts",
+    "typecheck:e2e": "./frontend/node_modules/.bin/tsc -p tests/coverage/tsconfig.json",
+    "e2e:smoke": "node --env-file-if-exists=.env node_modules/@synopackageland/cli/dist/e2e/dsm.js tunnel -- e2e run --config e2e.smoke.config.ts",
+    "test:ctl": "node --test tests/ctl-*.test.ts tests/registry.test.ts",
+    "test:ctl:browser": "node scripts/test-search-browser.mjs",
+    "ctl:generate": "synopkgland ctl generate",
+    "ctl:check": "synopkgland ctl generate --check"
+  },
+  "devDependencies": {
+    "@ai-sdk/openai": "4.0.91",
+    "@e2e-dev/web": "0.14.0",
+    "@synopackageland/app": "0.53.49",
+    "@synopackageland/cli": "~0.54.6",
+    "@synopackageland/sdk": "0.53.49",
+    "@synopackageland/templates": "0.42.1",
+    "@types/node": "26.6.3",
+    "ai": "7.0.137",
+    "e2e": "0.19.0",
+    "playwright": "1.63.0",
+    "yaml": "2.9.1"
+  }
+}

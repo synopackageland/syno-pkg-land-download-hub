@@ -1,0 +1,1833 @@
+/*
+Copyright 2026 The Clustarr Authors.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+// Package contracttest holds the conformance suite that every events.Bus
+// implementation must pass.
+//
+// It is an exported test helper rather than an internal test so that natsbus,
+// membus and any future implementation are all held to one definition of
+// correct behaviour: if membus and natsbus disagree, a unit test written
+// against membus is worthless.
+package contracttest
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/mediactl/clustarr/pkg/events"
+)
+
+// Timeout bounds every wait in the suite. It is generous because the
+// JetStream run starts a real server.
+const Timeout = 30 * time.Second
+
+// Topology is the layout the suite applies. It is the production topology
+// shrunk to a single node, with the durable consumers removed: the suite
+// creates its own consumers with test-sized ack waits and backoffs, and
+// JetStream refuses two consumers with overlapping filters on the same
+// work-queue stream.
+func Topology() events.Topology {
+	t := events.Default().ForSingleNode()
+	t.Consumers = nil
+	return t
+}
+
+// RunBusContract runs the whole suite against the bus returned by newBus.
+// newBus is called once per subtest and must return a bus that has not yet
+// had Ensure called on it; the suite closes each bus when its subtest ends.
+func RunBusContract(t *testing.T, newBus func() events.Bus) {
+	t.Helper()
+	t.Run("PublishSubscribe", func(t *testing.T) { testPublishSubscribe(t, newBus) })
+	t.Run("Deduplication", func(t *testing.T) { testDeduplication(t, newBus) })
+	t.Run("WorkQueueRetryThenAck", func(t *testing.T) { testRetryThenAck(t, newBus) })
+	t.Run("WorkQueueDiscardToDLQ", func(t *testing.T) { testDiscardToDLQ(t, newBus) })
+	t.Run("WorkQueueMaxDeliverToDLQ", func(t *testing.T) { testMaxDeliverToDLQ(t, newBus) })
+	t.Run("WorkQueueHungHandlerToDLQ", func(t *testing.T) {
+		testHungHandlerToDLQ(t, newBus, hungMaxDeliver)
+	})
+	t.Run("WorkQueueHungHandlerSaturatedToDLQ", func(t *testing.T) {
+		testHungHandlerToDLQ(t, newBus, 1)
+	})
+	t.Run("WorkQueueLapseWhileUnwatchedToDLQ", func(t *testing.T) {
+		testLapseWhileUnwatchedToDLQ(t, newBus)
+	})
+	t.Run("WorkQueueNakRedeliveryFollowsBackoff", func(t *testing.T) {
+		testNakRedeliveryFollowsBackoff(t, newBus)
+	})
+	t.Run("WorkQueueHungRedeliveryFollowsBackoff", func(t *testing.T) {
+		testHungRedeliveryFollowsBackoff(t, newBus)
+	})
+	t.Run("MaxInFlightHandlersRunConcurrently", func(t *testing.T) {
+		testMaxInFlightConcurrency(t, newBus)
+	})
+	t.Run("HungHandlerDoesNotStallSubscription", func(t *testing.T) {
+		testHungHandlerDoesNotStall(t, newBus)
+	})
+	t.Run("WorkQueueAckRemoves", func(t *testing.T) { testAckRemoves(t, newBus) })
+	t.Run("ScheduledPublish", func(t *testing.T) { testScheduledPublish(t, newBus) })
+	t.Run("KeyValueCreateAndCAS", func(t *testing.T) { testKVCreateAndCAS(t, newBus) })
+	t.Run("KeyValueDeleteRevision", func(t *testing.T) { testKVDeleteRevision(t, newBus) })
+	t.Run("KeyValueTTL", func(t *testing.T) { testKVTTL(t, newBus) })
+	t.Run("KeyValueWatch", func(t *testing.T) { testKVWatch(t, newBus) })
+	t.Run("ObjectStorePutGetRoundTrip", func(t *testing.T) { testObjectStorePutGet(t, newBus) })
+	t.Run("ObjectStoreOverwriteChangesDigestAndModTime", func(t *testing.T) {
+		testObjectStoreOverwrite(t, newBus)
+	})
+	t.Run("ObjectStoreInfoMissing", func(t *testing.T) { testObjectStoreInfoMissing(t, newBus) })
+	t.Run("ObjectStoreDeleteThenGet", func(t *testing.T) { testObjectStoreDeleteThenGet(t, newBus) })
+	t.Run("ObjectStoreListByPrefix", func(t *testing.T) { testObjectStoreListByPrefix(t, newBus) })
+	t.Run("RequestReply", func(t *testing.T) { testRequestReply(t, newBus) })
+	t.Run("RequestReplyHandlersRunConcurrently", func(t *testing.T) { testServeConcurrency(t, newBus) })
+	t.Run("RequestReplyPanicKeepsServing", func(t *testing.T) { testServePanic(t, newBus) })
+	t.Run("RequestReplyErrorSemantics", func(t *testing.T) { testServeErrorSemantics(t, newBus) })
+	t.Run("RequestReplyExpiredCallerIsNotRun", func(t *testing.T) { testServeExpiredCaller(t, newBus) })
+	t.Run("RequestReplySaturatedIsBusy", func(t *testing.T) { testServeBusy(t, newBus) })
+	t.Run("RequestReplyHandlerDeadlineFollowsCaller", func(t *testing.T) {
+		testServeDeadlineFollowsCaller(t, newBus)
+	})
+	t.Run("UnknownSubject", func(t *testing.T) { testUnknownSubject(t, newBus) })
+}
+
+// Run is the name the design document gives the suite entry point. It is an
+// alias for RunBusContract.
+func Run(t *testing.T, newBus func() events.Bus) {
+	t.Helper()
+	RunBusContract(t, newBus)
+}
+
+// RunHooksContract runs the publish/receive observability-hooks conformance
+// case against a bus built with no hooks (newBus, reusing RunBusContract's
+// constructor) and a bus built with hooks installed (newBusWithHooks). It is
+// a separate entry point from RunBusContract because installing hooks
+// changes the bus's construction, not just its topology: natsbus and membus
+// each accept events.Hooks through a constructor Option.
+func RunHooksContract(t *testing.T, newBus func() events.Bus,
+	newBusWithHooks func(events.Hooks) events.Bus,
+) {
+	t.Helper()
+	t.Run("Hooks", func(t *testing.T) { testHooksContract(t, newBus, newBusWithHooks) })
+}
+
+// setup builds a bus with the contract topology applied and registers its
+// shutdown.
+func setup(t *testing.T, newBus func() events.Bus) (context.Context, events.Bus) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
+	t.Cleanup(cancel)
+	bus := newBus()
+	t.Cleanup(func() {
+		if err := bus.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	if err := bus.Ensure(ctx, Topology()); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	return ctx, bus
+}
+
+// collector accumulates deliveries for assertions.
+type collector struct {
+	mu   sync.Mutex
+	msgs []*events.Envelope
+	subs []string
+	ch   chan struct{}
+}
+
+func newCollector() *collector {
+	return &collector{ch: make(chan struct{}, 256)}
+}
+
+func (c *collector) add(m events.Message) {
+	c.mu.Lock()
+	c.msgs = append(c.msgs, m.Envelope())
+	c.subs = append(c.subs, m.Subject())
+	c.mu.Unlock()
+	select {
+	case c.ch <- struct{}{}:
+	default:
+	}
+}
+
+func (c *collector) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.msgs)
+}
+
+func (c *collector) at(i int) (*events.Envelope, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.msgs[i], c.subs[i]
+}
+
+// waitFor blocks until want deliveries have arrived.
+func (c *collector) waitFor(t *testing.T, want int, what string) {
+	t.Helper()
+	deadline := time.After(Timeout)
+	for c.len() < want {
+		select {
+		case <-c.ch:
+		case <-time.After(20 * time.Millisecond):
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d %s, got %d", want, what, c.len())
+		}
+	}
+}
+
+// waitUntil polls cond until it holds or the suite timeout expires.
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(Timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// envelope builds a test envelope with a JSON body.
+func envelope(id, schema string, body any) *events.Envelope {
+	data, err := json.Marshal(body)
+	if err != nil {
+		panic(err)
+	}
+	return &events.Envelope{
+		ID:      id,
+		Type:    "contracttest",
+		Schema:  schema,
+		Source:  "contracttest@0.0.0",
+		Key:     "default/contract",
+		Trace:   "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+		Headers: map[string]string{"X-Contract": "yes"},
+		Data:    data,
+	}
+}
+
+func testPublishSubscribe(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	got := newCollector()
+
+	stop, err := bus.Subscribe(ctx, events.Subscription{
+		Stream:      events.StreamEvents,
+		Durable:     "ct-events",
+		Filters:     []string{events.FilterAllEvents},
+		AckWait:     5 * time.Second,
+		MaxDeliver:  3,
+		Backoff:     []time.Duration{50 * time.Millisecond},
+		MaxInFlight: 8,
+	}, func(_ context.Context, m events.Message) error {
+		got.add(m)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer stop()
+
+	subject := events.CatalogItemSubject("movie", events.ActionAdded, "uid-1")
+	env := envelope("evt-1", "catalog.ItemEvent.v1", map[string]string{"title": "Arrival"})
+	rec, err := bus.Publish(ctx, subject, env)
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if rec.Stream != events.StreamEvents {
+		t.Errorf("Receipt.Stream = %q, want %q", rec.Stream, events.StreamEvents)
+	}
+	if rec.Seq == 0 {
+		t.Error("Receipt.Seq = 0, want a stream sequence")
+	}
+	if rec.Duplicate {
+		t.Error("Receipt.Duplicate = true on a first publish")
+	}
+
+	got.waitFor(t, 1, "deliveries")
+	e, sub := got.at(0)
+	if sub != subject {
+		t.Errorf("Subject = %q, want %q", sub, subject)
+	}
+	if e.ID != "evt-1" {
+		t.Errorf("Envelope.ID = %q, want %q", e.ID, "evt-1")
+	}
+	if e.Schema != "catalog.ItemEvent.v1" {
+		t.Errorf("Envelope.Schema = %q, want %q", e.Schema, "catalog.ItemEvent.v1")
+	}
+	if e.Source != "contracttest@0.0.0" {
+		t.Errorf("Envelope.Source = %q", e.Source)
+	}
+	if e.Key != "default/contract" {
+		t.Errorf("Envelope.Key = %q", e.Key)
+	}
+	if e.Trace == "" {
+		t.Error("Envelope.Trace was not propagated")
+	}
+	if e.Time.IsZero() {
+		t.Error("Envelope.Time was not propagated")
+	}
+	if e.Headers["X-Contract"] != "yes" {
+		t.Errorf("custom header lost: %v", e.Headers)
+	}
+	if string(e.Data) != string(env.Data) {
+		t.Errorf("Data = %q, want %q", e.Data, env.Data)
+	}
+}
+
+func testDeduplication(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	subject := events.CatalogItemSubject("movie", events.ActionUpdated, "uid-dedup")
+	id := events.MsgIDForObject("uid-dedup", 7, "item")
+
+	first, err := bus.Publish(ctx, subject, envelope(id, "catalog.ItemEvent.v1", 1))
+	if err != nil {
+		t.Fatalf("first Publish: %v", err)
+	}
+	if first.Duplicate {
+		t.Fatal("first publish reported as duplicate")
+	}
+	second, err := bus.Publish(ctx, subject, envelope(id, "catalog.ItemEvent.v1", 2))
+	if err != nil {
+		t.Fatalf("second Publish: %v", err)
+	}
+	if !second.Duplicate {
+		t.Error("second publish of the same Nats-Msg-Id was not reported as a duplicate")
+	}
+	if second.Seq != first.Seq {
+		t.Errorf("duplicate Seq = %d, want the original %d", second.Seq, first.Seq)
+	}
+}
+
+// subscribeDLQ attaches a collector to the dead-letter stream.
+func subscribeDLQ(ctx context.Context, t *testing.T, bus events.Bus) *collector {
+	t.Helper()
+	got := newCollector()
+	stop, err := bus.Subscribe(ctx, events.Subscription{
+		Stream:      events.StreamDLQ,
+		Durable:     "ct-dlq",
+		Filters:     []string{events.FilterAllDLQ},
+		AckWait:     5 * time.Second,
+		MaxDeliver:  3,
+		Backoff:     []time.Duration{50 * time.Millisecond},
+		MaxInFlight: 8,
+	}, func(_ context.Context, m events.Message) error {
+		got.add(m)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Subscribe DLQ: %v", err)
+	}
+	t.Cleanup(stop)
+	return got
+}
+
+func testRetryThenAck(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	dlq := subscribeDLQ(ctx, t, bus)
+
+	var mu sync.Mutex
+	var attempts []uint64
+	done := make(chan struct{})
+
+	stop, err := bus.Subscribe(ctx, events.Subscription{
+		Stream:      events.StreamWorkCatalogarr,
+		Durable:     "ct-search-high",
+		Filters:     []string{"clustarr.work.catalogarr.search.high.>"},
+		AckWait:     5 * time.Second,
+		MaxDeliver:  4,
+		Backoff:     []time.Duration{50 * time.Millisecond},
+		MaxInFlight: 1,
+	}, func(ctx context.Context, m events.Message) error {
+		mu.Lock()
+		attempts = append(attempts, m.Attempt())
+		n := len(attempts)
+		mu.Unlock()
+		if n == 1 {
+			// Exercise the heartbeat before asking for a redelivery.
+			if err := m.InProgress(ctx); err != nil {
+				t.Errorf("InProgress: %v", err)
+			}
+			return events.Retry(50*time.Millisecond, errors.New("indexer busy"))
+		}
+		close(done)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer stop()
+
+	subject := events.WorkSearchSubject(events.PriorityHigh, "movie-1")
+	if _, err := bus.Publish(ctx, subject,
+		envelope("task-retry", "catalog.SearchTask.v1", map[string]string{"k": "v"})); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(Timeout):
+		t.Fatal("task was never redelivered and acknowledged")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) != 2 {
+		t.Fatalf("attempts = %v, want exactly two deliveries", attempts)
+	}
+	if attempts[0] != 1 || attempts[1] != 2 {
+		t.Errorf("Attempt() = %v, want [1 2]", attempts)
+	}
+	if n := dlq.len(); n != 0 {
+		t.Errorf("dead-lettered %d messages, want 0", n)
+	}
+}
+
+func testDiscardToDLQ(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	dlq := subscribeDLQ(ctx, t, bus)
+
+	var mu sync.Mutex
+	deliveries := 0
+	stop, err := bus.Subscribe(ctx, events.Subscription{
+		Stream:      events.StreamWorkImportarr,
+		Durable:     "ct-import",
+		Filters:     []string{events.FilterImportFile},
+		AckWait:     5 * time.Second,
+		MaxDeliver:  5,
+		Backoff:     []time.Duration{50 * time.Millisecond},
+		MaxInFlight: 1,
+	}, func(_ context.Context, _ events.Message) error {
+		mu.Lock()
+		deliveries++
+		mu.Unlock()
+		return events.Discard("unparsable payload", errors.New("bad json"))
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer stop()
+
+	subject := events.WorkFileImportSubject("dl-1")
+	body := envelope("task-discard", "catalog.ImportTask.v1", map[string]string{"k": "v"})
+	if _, err := bus.Publish(ctx, subject, body); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	dlq.waitFor(t, 1, "dead-letter copies")
+	e, dlqSubject := dlq.at(0)
+	if want := events.DLQSubject("importarr", "fileimport", "task-discard"); dlqSubject != want {
+		t.Errorf("DLQ subject = %q, want %q", dlqSubject, want)
+	}
+	if got := e.Headers[events.HeaderDLQReason]; got != "unparsable payload" {
+		t.Errorf("%s = %q, want %q", events.HeaderDLQReason, got, "unparsable payload")
+	}
+	if got := e.Headers[events.HeaderDLQSubject]; got != subject {
+		t.Errorf("%s = %q, want %q", events.HeaderDLQSubject, got, subject)
+	}
+	if got := e.Headers[events.HeaderDLQConsumer]; got != "ct-import" {
+		t.Errorf("%s = %q, want %q", events.HeaderDLQConsumer, got, "ct-import")
+	}
+	if got := e.Headers[events.HeaderDLQAttempts]; got != "1" {
+		t.Errorf("%s = %q, want %q", events.HeaderDLQAttempts, got, "1")
+	}
+	if string(e.Data) != string(body.Data) {
+		t.Errorf("dead-lettered payload = %q, want the original %q", e.Data, body.Data)
+	}
+	if e.Schema != body.Schema {
+		t.Errorf("dead-lettered schema = %q, want %q", e.Schema, body.Schema)
+	}
+
+	// A discard bypasses MaxDeliver: the task is handled exactly once.
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if deliveries != 1 {
+		t.Errorf("handler ran %d times, want 1", deliveries)
+	}
+}
+
+func testMaxDeliverToDLQ(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	dlq := subscribeDLQ(ctx, t, bus)
+
+	var mu sync.Mutex
+	var attempts []uint64
+	stop, err := bus.Subscribe(ctx, events.Subscription{
+		Stream:      events.StreamWorkIndexarr,
+		Durable:     "ct-rss",
+		Filters:     []string{events.FilterIndexRSS},
+		AckWait:     5 * time.Second,
+		MaxDeliver:  3,
+		Backoff:     []time.Duration{20 * time.Millisecond, 20 * time.Millisecond},
+		MaxInFlight: 1,
+	}, func(_ context.Context, m events.Message) error {
+		mu.Lock()
+		attempts = append(attempts, m.Attempt())
+		mu.Unlock()
+		return errors.New("indexer unreachable")
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer stop()
+
+	if _, err := bus.Publish(ctx, events.WorkRSSSubject("idx-1"),
+		envelope("task-rss", "index.RssTask.v1", map[string]string{"k": "v"})); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	dlq.waitFor(t, 1, "dead-letter copies")
+	e, _ := dlq.at(0)
+	if got := e.Headers[events.HeaderDLQAttempts]; got != "3" {
+		t.Errorf("%s = %q, want %q", events.HeaderDLQAttempts, got, "3")
+	}
+	if e.Headers[events.HeaderDLQReason] == "" {
+		t.Errorf("%s is empty", events.HeaderDLQReason)
+	}
+
+	// The delivery budget must be exactly MaxDeliver, not one more.
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) != 3 {
+		t.Fatalf("attempts = %v, want three deliveries", attempts)
+	}
+	for i, a := range attempts {
+		if a != uint64(i+1) {
+			t.Errorf("attempt %d reported Attempt() = %d", i, a)
+		}
+	}
+}
+
+// hungMaxDeliver is the delivery budget of the hung-handler cases.
+const hungMaxDeliver = 2
+
+// testHungHandlerToDLQ holds the one dead-letter case events.Settle cannot
+// see: a handler that blocks past its acknowledgement deadline on every
+// delivery never returns, so nothing in process settles the final delivery.
+// The bus must still copy the message to the DLQ once that delivery lapses
+// -- natsbus from JetStream's MAX_DELIVERIES advisory, membus from its own
+// ack-deadline sweep -- exactly once, and a hung handler that finally returns
+// an error must not add a second copy.
+//
+// It runs with inFlight handler slots. With one per delivery, every delivery
+// hangs in its own handler. With one slot (the saturated case) the first
+// delivery's hung handler holds it, so the final delivery is made but can
+// never start: the copy must come from the lapse all the same, and not wait
+// for a slot to free, which a hung handler never does.
+func testHungHandlerToDLQ(t *testing.T, newBus func() events.Bus, inFlight int) {
+	ctx, bus := setup(t, newBus)
+	dlq := subscribeDLQ(ctx, t, bus)
+
+	const maxDeliver = hungMaxDeliver
+	const ackWait = 300 * time.Millisecond
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	// Registered after setup's Close, so it runs first: a bus that waits
+	// for its handlers on Close must not wait on a hung one.
+	t.Cleanup(unblock)
+
+	var mu sync.Mutex
+	var attempts []uint64
+	returned := 0
+	stop, err := bus.Subscribe(ctx, events.Subscription{
+		Stream:  events.StreamWorkIndexarr,
+		Durable: "ct-hung",
+		Filters: []string{events.FilterIndexRSS},
+		// With Backoff set, delivery n times out on Backoff[n-1], not
+		// AckWait (testHungRedeliveryFollowsBackoff); equal values keep this
+		// case about the lapse, not the schedule.
+		AckWait:     ackWait,
+		MaxDeliver:  maxDeliver,
+		Backoff:     []time.Duration{ackWait},
+		MaxInFlight: inFlight,
+	}, func(ctx context.Context, m events.Message) error {
+		mu.Lock()
+		attempts = append(attempts, m.Attempt())
+		mu.Unlock()
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		mu.Lock()
+		returned++
+		mu.Unlock()
+		return errors.New("handler hung past its acknowledgement deadline")
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer stop()
+
+	subject := events.WorkRSSSubject("idx-hung")
+	body := envelope("task-hung", "index.RssTask.v1", map[string]string{"k": "v"})
+	if _, err := bus.Publish(ctx, subject, body); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	dlq.waitFor(t, 1, "dead-letter copies of a hung handler's message")
+	mu.Lock()
+	if returned != 0 {
+		t.Errorf("%d handlers returned before the copy; it must come from the lapsed final delivery, not from Settle", returned)
+	}
+	mu.Unlock()
+
+	e, dlqSubject := dlq.at(0)
+	if want := events.DLQSubject("indexarr", "rss", "task-hung"); dlqSubject != want {
+		t.Errorf("DLQ subject = %q, want %q", dlqSubject, want)
+	}
+	for header, want := range map[string]string{
+		events.HeaderDLQReason:   events.AckWaitExhaustedReason(maxDeliver),
+		events.HeaderDLQAttempts: fmt.Sprint(maxDeliver),
+		events.HeaderDLQConsumer: "ct-hung",
+		events.HeaderDLQSubject:  subject,
+		events.HeaderDLQMsgID:    "task-hung",
+		"X-Contract":             "yes",
+	} {
+		if got := e.Headers[header]; got != want {
+			t.Errorf("%s = %q, want %q", header, got, want)
+		}
+	}
+	if string(e.Data) != string(body.Data) {
+		t.Errorf("dead-lettered payload = %q, want the original %q", e.Data, body.Data)
+	}
+	if e.Schema != body.Schema || e.Key != body.Key {
+		t.Errorf("dead-lettered schema/key = %q/%q, want %q/%q", e.Schema, e.Key, body.Schema, body.Key)
+	}
+
+	// While the handler stays hung: no delivery past MaxDeliver, no second
+	// copy.
+	time.Sleep(4 * ackWait)
+	if n := dlq.len(); n != 1 {
+		t.Errorf("dead-lettered %d copies while the handler hung, want exactly 1", n)
+	}
+
+	// Release it. Every delivery now fails, and the final one is dead-lettered
+	// by Settle under the same Msg-Id: a duplicate, not a second copy.
+	unblock()
+	waitUntil(t, "every delivery's handler to return", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return returned >= len(attempts) && len(attempts) >= maxDeliver
+	})
+	time.Sleep(300 * time.Millisecond)
+	if n := dlq.len(); n != 1 {
+		t.Errorf("dead-lettered %d copies once the hung handler returned, want exactly 1", n)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) != maxDeliver {
+		t.Errorf("attempts = %v, want exactly %d deliveries", attempts, maxDeliver)
+	}
+	for i, a := range attempts {
+		if a != uint64(i+1) {
+			t.Errorf("delivery %d reported Attempt() = %d", i, a)
+		}
+	}
+}
+
+// testLapseWhileUnwatchedToDLQ is the hung-handler case with nothing
+// watching when the final delivery lapses: the consumer's only replica stops
+// after the final delivery is made and before its deadline passes, and
+// starts again later. The message must still reach the DLQ, exactly once,
+// once a replica is back. natsbus lost it: JetStream announces the lapse on
+// core NATS when it next tries to deliver, and a pull request the stopping
+// replica left behind is enough for it to try, with no watcher subscribed.
+// The advisory stream keeps it until the next watcher reads it. membus
+// sweeps the lapse from the returning subscription.
+func testLapseWhileUnwatchedToDLQ(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	dlq := subscribeDLQ(ctx, t, bus)
+
+	const maxDeliver = 2
+	const deadline = time.Second
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+
+	sub := events.Subscription{
+		Stream:      events.StreamWorkIndexarr,
+		Durable:     "ct-unwatched",
+		Filters:     []string{events.FilterIndexRSS},
+		AckWait:     deadline,
+		MaxDeliver:  maxDeliver,
+		Backoff:     []time.Duration{deadline},
+		MaxInFlight: maxDeliver,
+	}
+	var mu sync.Mutex
+	var attempts []uint64
+	stop, err := bus.Subscribe(ctx, sub, func(_ context.Context, m events.Message) error {
+		mu.Lock()
+		attempts = append(attempts, m.Attempt())
+		mu.Unlock()
+		// Deaf to its context on purpose: stop cancels it, and a handler
+		// that returned then would dead-letter the final delivery in
+		// process, which is not the path under test.
+		<-release
+		return errors.New("hung")
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	if _, err := bus.Publish(ctx, events.WorkRSSSubject("idx-unwatched"),
+		envelope("task-unwatched", "index.RssTask.v1", 0)); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	waitUntil(t, "the final delivery", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(attempts) >= maxDeliver
+	})
+
+	// The replica stops. Its stop waits for the hung handlers, so it runs
+	// aside; the pull and the watcher stop at once.
+	stopped := make(chan struct{})
+	go func() {
+		stop()
+		close(stopped)
+	}()
+	t.Cleanup(func() {
+		unblock()
+		<-stopped
+	})
+
+	// Well past the final delivery's deadline, with nothing watching.
+	time.Sleep(3 * deadline)
+	if n := dlq.len(); n != 0 {
+		t.Fatalf("dead-lettered %d copies with no replica subscribed; the case no longer "+
+			"tests a lapse nobody watched", n)
+	}
+
+	// A replica comes back.
+	var redelivered int
+	stop2, err := bus.Subscribe(ctx, sub, func(context.Context, events.Message) error {
+		mu.Lock()
+		redelivered++
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Subscribe again: %v", err)
+	}
+	defer stop2()
+
+	dlq.waitFor(t, 1, "the dead-letter copy of a lapse nobody watched")
+	e, dlqSubject := dlq.at(0)
+	if want := events.DLQSubject("indexarr", "rss", "task-unwatched"); dlqSubject != want {
+		t.Errorf("DLQ subject = %q, want %q", dlqSubject, want)
+	}
+	for header, want := range map[string]string{
+		events.HeaderDLQReason:   events.AckWaitExhaustedReason(maxDeliver),
+		events.HeaderDLQAttempts: fmt.Sprint(maxDeliver),
+		events.HeaderDLQConsumer: sub.Durable,
+	} {
+		if got := e.Headers[header]; got != want {
+			t.Errorf("%s = %q, want %q", header, got, want)
+		}
+	}
+
+	// The spent message is not delivered again, and the hung handler's
+	// eventual failure is the same copy, not a second one.
+	unblock()
+	<-stopped
+	time.Sleep(500 * time.Millisecond)
+	if n := dlq.len(); n != 1 {
+		t.Errorf("dead-lettered %d copies, want exactly 1", n)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if redelivered != 0 {
+		t.Errorf("the returning replica was handed the spent message %d times, want 0", redelivered)
+	}
+}
+
+// testNakRedeliveryFollowsBackoff pins the retry schedule a failing handler
+// actually gets: after attempt n fails, the next delivery comes Backoff[n-1]
+// later (the last entry past the end), as events.Settle asks. JetStream adds
+// Backoff[n-1] - Backoff[0] to a delayed nak on a consumer with BackOff, so
+// natsbus once waited close to twice each step past the first. The entries
+// differ widely so that addition cannot hide inside the tolerance.
+func testNakRedeliveryFollowsBackoff(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+
+	const (
+		maxDeliver = 4
+		first      = 100 * time.Millisecond
+		later      = 2 * time.Second
+		// slack absorbs the gap between the broker making a delivery and
+		// the handler recording it. The doubled schedule would be
+		// later + later - first, far outside it.
+		slack = 300 * time.Millisecond
+	)
+	var mu sync.Mutex
+	var at []time.Time
+	done := make(chan struct{})
+	stop, err := bus.Subscribe(ctx, events.Subscription{
+		Stream:      events.StreamWorkIndexarr,
+		Durable:     "ct-nak-backoff",
+		Filters:     []string{events.FilterIndexRSS},
+		AckWait:     20 * time.Second,
+		MaxDeliver:  maxDeliver,
+		Backoff:     []time.Duration{first, later},
+		MaxInFlight: 1,
+	}, func(context.Context, events.Message) error {
+		mu.Lock()
+		defer mu.Unlock()
+		at = append(at, time.Now())
+		if len(at) < maxDeliver {
+			return errors.New("indexer unreachable")
+		}
+		close(done)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer stop()
+
+	if _, err := bus.Publish(ctx, events.WorkRSSSubject("idx-nak"),
+		envelope("task-nak", "index.RssTask.v1", 0)); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(Timeout):
+		t.Fatal("the failing task never reached its last delivery")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for n, want := range []time.Duration{first, later, later} {
+		gap := at[n+1].Sub(at[n])
+		if gap < want-slack/3 || gap > want+slack {
+			t.Errorf("delivery %d came %v after delivery %d failed, want Backoff = %v",
+				n+2, gap, n+1, want)
+		}
+	}
+}
+
+// testHungRedeliveryFollowsBackoff pins when a delivery nobody settled is
+// made again. With Backoff set, JetStream times delivery n out on
+// Backoff[n-1] (the last entry past the end), not AckWait, and a bus that
+// timed every delivery on AckWait would hand a hung handler's message out on
+// a different schedule in a unit test than in production. Unequal values keep
+// the rules apart: AckWait is far longer than either entry, and the entries
+// differ, so using Backoff[n] (or Backoff[0] throughout) shows too.
+func testHungRedeliveryFollowsBackoff(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	dlq := subscribeDLQ(ctx, t, bus)
+
+	const (
+		maxDeliver = 3
+		first      = 250 * time.Millisecond
+		second     = 2 * time.Second
+		ackWait    = 25 * time.Second
+		// slack absorbs the gap between the broker making a delivery and
+		// the handler recording it; a timer never fires early.
+		slack = 200 * time.Millisecond
+	)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+
+	var mu sync.Mutex
+	var at []time.Time
+	stop, err := bus.Subscribe(ctx, events.Subscription{
+		Stream:     events.StreamWorkIndexarr,
+		Durable:    "ct-backoff",
+		Filters:    []string{events.FilterIndexRSS},
+		AckWait:    ackWait,
+		MaxDeliver: maxDeliver,
+		Backoff:    []time.Duration{first, second},
+		// Every delivery hangs, so each needs its own handler.
+		MaxInFlight: maxDeliver,
+	}, func(ctx context.Context, _ events.Message) error {
+		mu.Lock()
+		at = append(at, time.Now())
+		mu.Unlock()
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return errors.New("hung")
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer stop()
+
+	if _, err := bus.Publish(ctx, events.WorkRSSSubject("idx-backoff"),
+		envelope("task-backoff", "index.RssTask.v1", 0)); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	waitUntil(t, fmt.Sprintf("%d deliveries of a hung handler's message", maxDeliver), func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(at) >= maxDeliver
+	})
+	dlq.waitFor(t, 1, "the dead-letter copy of the lapsed final delivery")
+	copied := time.Now()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gap := at[1].Sub(at[0]); gap < first-slack || gap >= second-slack {
+		t.Errorf("delivery 2 came %v after delivery 1, want Backoff[0] = %v", gap, first)
+	}
+	if gap := at[2].Sub(at[1]); gap < second-slack || gap >= ackWait/2 {
+		t.Errorf("delivery 3 came %v after delivery 2, want Backoff[1] = %v", gap, second)
+	}
+	// The final delivery reuses the last entry.
+	if gap := copied.Sub(at[2]); gap < second-slack || gap >= ackWait/2 {
+		t.Errorf("the final delivery lapsed %v after it was made, want Backoff[1] = %v", gap, second)
+	}
+}
+
+// testMaxInFlightConcurrency pins that a subscription runs up to MaxInFlight
+// handlers at once and never more. natsbus once ran one at a time whatever
+// MaxInFlight said -- JetStream's Consume calls back serially -- so a worker
+// sized for eight concurrent searches did one.
+func testMaxInFlightConcurrency(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+
+	const inFlight = 3
+	const published = 2*inFlight + 1
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+
+	var mu sync.Mutex
+	running, most, started, finished := 0, 0, 0, 0
+	stop, err := bus.Subscribe(ctx, events.Subscription{
+		Stream:      events.StreamWorkCaptionarr,
+		Durable:     "ct-concurrent",
+		Filters:     []string{events.FilterCaptionFetch},
+		AckWait:     10 * time.Second,
+		MaxDeliver:  3,
+		Backoff:     []time.Duration{10 * time.Second},
+		MaxInFlight: inFlight,
+	}, func(ctx context.Context, _ events.Message) error {
+		mu.Lock()
+		running++
+		started++
+		most = max(most, running)
+		mu.Unlock()
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		mu.Lock()
+		running--
+		finished++
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer stop()
+
+	for i := range published {
+		if _, err := bus.Publish(ctx, events.WorkFetchSubject(events.PriorityNormal,
+			fmt.Sprintf("req-%d", i), "en"),
+			envelope(fmt.Sprintf("conc-%d", i), "subtitle.FetchTask.v1", i)); err != nil {
+			t.Fatalf("Publish %d: %v", i, err)
+		}
+	}
+
+	waitUntil(t, fmt.Sprintf("%d handlers running at once", inFlight), func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return running == inFlight
+	})
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	if started != inFlight {
+		t.Errorf("%d handlers started while %d held every slot, want %d", started, inFlight, inFlight)
+	}
+	mu.Unlock()
+
+	unblock()
+	waitUntil(t, "every message to be handled", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return finished == published
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if most != inFlight {
+		t.Errorf("at most %d handlers ran at once, want exactly MaxInFlight=%d", most, inFlight)
+	}
+	if started != published {
+		t.Errorf("%d handlers started for %d messages; an acknowledged message was redelivered", started, published)
+	}
+}
+
+// testHungHandlerDoesNotStall is the failure the concurrency is for: a
+// handler hung on a delivery that is not its last -- long before any
+// acknowledgement deadline, so no redelivery or dead letter is near -- must
+// not stop the subscription's other handler slots from working through
+// everything else.
+func testHungHandlerDoesNotStall(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+
+	const hungID = "stall-hung"
+	const others = 5
+	got := newCollector()
+	stop, err := bus.Subscribe(ctx, events.Subscription{
+		Stream:      events.StreamWorkIndexarr,
+		Durable:     "ct-stall",
+		Filters:     []string{events.FilterIndexRSS},
+		AckWait:     20 * time.Second,
+		MaxDeliver:  5,
+		Backoff:     []time.Duration{20 * time.Second},
+		MaxInFlight: 2,
+	}, func(ctx context.Context, m events.Message) error {
+		if m.Envelope().ID == hungID {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return nil
+		}
+		got.add(m)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer stop()
+
+	// The hung task is published first, so it is the first delivery.
+	if _, err := bus.Publish(ctx, events.WorkRSSSubject("idx-hung"),
+		envelope(hungID, "index.RssTask.v1", 0)); err != nil {
+		t.Fatalf("Publish hung: %v", err)
+	}
+	for i := range others {
+		if _, err := bus.Publish(ctx, events.WorkRSSSubject(fmt.Sprintf("idx-%d", i)),
+			envelope(fmt.Sprintf("stall-%d", i), "index.RssTask.v1", i)); err != nil {
+			t.Fatalf("Publish %d: %v", i, err)
+		}
+	}
+	got.waitFor(t, others, "deliveries past the hung handler")
+	for i := range others {
+		if e, _ := got.at(i); e.ID == hungID {
+			t.Errorf("the hung task was delivered twice")
+		}
+	}
+}
+
+func testAckRemoves(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	got := newCollector()
+
+	stop, err := bus.Subscribe(ctx, events.Subscription{
+		Stream:      events.StreamWorkCaptionarr,
+		Durable:     "ct-fetch",
+		Filters:     []string{events.FilterCaptionFetch},
+		AckWait:     2 * time.Second,
+		MaxDeliver:  3,
+		Backoff:     []time.Duration{50 * time.Millisecond},
+		MaxInFlight: 4,
+	}, func(_ context.Context, m events.Message) error {
+		got.add(m)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer stop()
+
+	for i := range 3 {
+		subject := events.WorkFetchSubject(events.PriorityNormal,
+			fmt.Sprintf("req-%d", i), "en")
+		if _, err := bus.Publish(ctx, subject,
+			envelope(fmt.Sprintf("fetch-%d", i), "subtitle.FetchTask.v1",
+				map[string]int{"i": i})); err != nil {
+			t.Fatalf("Publish %d: %v", i, err)
+		}
+	}
+	got.waitFor(t, 3, "work-queue deliveries")
+
+	// An acknowledged work-queue message is gone: nothing is redelivered
+	// once the ack wait has passed.
+	time.Sleep(2500 * time.Millisecond)
+	if n := got.len(); n != 3 {
+		t.Errorf("received %d deliveries, want exactly 3", n)
+	}
+}
+
+// testScheduledPublish covers the delay-profile path: a grab published with
+// WithScheduleAt must be held until it is due and then delivered on its real
+// work subject, not on the holding subject.
+func testScheduledPublish(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+
+	type delivery struct {
+		at      time.Time
+		subject string
+	}
+	got := make(chan delivery, 4)
+
+	stop, err := bus.Subscribe(ctx, events.Subscription{
+		Stream:      events.StreamWorkCatalogarr,
+		Durable:     "ct-grab",
+		Filters:     []string{events.FilterCatalogGrab},
+		AckWait:     5 * time.Second,
+		MaxDeliver:  3,
+		Backoff:     []time.Duration{50 * time.Millisecond},
+		MaxInFlight: 1,
+	}, func(_ context.Context, m events.Message) error {
+		select {
+		case got <- delivery{at: time.Now(), subject: m.Subject()}:
+		default:
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer stop()
+
+	subject := events.WorkGrabSubject("movie-delayed")
+	due := time.Now().Add(2 * time.Second)
+	if _, err := bus.Publish(ctx, subject,
+		envelope("grab-delayed", "catalog.GrabTask.v1", map[string]string{"k": "v"}),
+		events.WithScheduleAt(due)); err != nil {
+		t.Fatalf("Publish with a schedule: %v", err)
+	}
+
+	select {
+	case d := <-got:
+		// Brokers round schedules to their own tick, so allow a little slack
+		// before the nominal due time but none of the seconds-scale kind.
+		if d.at.Before(due.Add(-1500 * time.Millisecond)) {
+			t.Errorf("scheduled task delivered at %s, well before its due time %s",
+				d.at, due)
+		}
+		if d.subject != subject {
+			t.Errorf("delivered on %q, want the target subject %q", d.subject, subject)
+		}
+	case <-time.After(Timeout):
+		t.Fatal("scheduled task was never delivered")
+	}
+}
+
+func testKVCreateAndCAS(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	kv := bus.KV(events.BucketLeases)
+	key := events.LeaseKey("movie/the-thing")
+
+	rev, err := kv.Create(ctx, key, []byte("download-1"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if rev == 0 {
+		t.Error("Create returned revision 0")
+	}
+
+	if _, err := kv.Create(ctx, key, []byte("download-2")); !errors.Is(err, events.ErrKeyExists) {
+		t.Fatalf("second Create error = %v, want ErrKeyExists", err)
+	}
+
+	entry, err := kv.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(entry.Value) != "download-1" {
+		t.Errorf("Value = %q, want %q", entry.Value, "download-1")
+	}
+	if entry.Revision != rev {
+		t.Errorf("Revision = %d, want %d", entry.Revision, rev)
+	}
+	if entry.Operation != events.KVPut {
+		t.Errorf("Operation = %q, want %q", entry.Operation, events.KVPut)
+	}
+
+	if _, err := kv.Update(ctx, key, []byte("download-3"), rev+99); !errors.Is(err, events.ErrRevisionMismatch) {
+		t.Fatalf("stale Update error = %v, want ErrRevisionMismatch", err)
+	}
+
+	next, err := kv.Update(ctx, key, []byte("download-3"), rev)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if next <= rev {
+		t.Errorf("Update revision = %d, want greater than %d", next, rev)
+	}
+
+	if err := kv.Delete(ctx, key); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := kv.Get(ctx, key); !errors.Is(err, events.ErrKeyNotFound) {
+		t.Fatalf("Get after Delete error = %v, want ErrKeyNotFound", err)
+	}
+	// Deleting an absent key is a no-op, so a sweeper can run unconditionally.
+	if err := kv.Delete(ctx, key); err != nil {
+		t.Errorf("Delete of an absent key: %v", err)
+	}
+	// A deleted lease can be taken again.
+	if _, err := kv.Create(ctx, key, []byte("download-4")); err != nil {
+		t.Errorf("Create after Delete: %v", err)
+	}
+}
+
+// testKVDeleteRevision holds the revision-checked delete: a caller that read
+// a key and then decides to delete it must not delete a value another writer
+// put there in between -- the grab lease a failed Download frees can be
+// reclaimed by a new grab between the read and the delete.
+func testKVDeleteRevision(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	kv := bus.KV(events.BucketLeases)
+	key := events.LeaseKey("movie/the-thing")
+
+	read, err := kv.Create(ctx, key, []byte("download-1"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Another writer moves the key on after it was read.
+	moved, err := kv.Update(ctx, key, []byte("download-2"), read)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if err := kv.DeleteRevision(ctx, key, read); !errors.Is(err, events.ErrRevisionMismatch) {
+		t.Fatalf("DeleteRevision at the stale revision error = %v, want ErrRevisionMismatch", err)
+	}
+	entry, err := kv.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get after a refused DeleteRevision: %v", err)
+	}
+	if string(entry.Value) != "download-2" || entry.Revision != moved {
+		t.Errorf("after a refused DeleteRevision the key is %q@%d, want the other writer's %q@%d",
+			entry.Value, entry.Revision, "download-2", moved)
+	}
+	if err := kv.DeleteRevision(ctx, key, 0); !errors.Is(err, events.ErrRevisionMismatch) {
+		t.Errorf("DeleteRevision at revision 0 error = %v, want ErrRevisionMismatch, not an unconditional delete", err)
+	}
+
+	if err := kv.DeleteRevision(ctx, key, moved); err != nil {
+		t.Fatalf("DeleteRevision at the current revision: %v", err)
+	}
+	if _, err := kv.Get(ctx, key); !errors.Is(err, events.ErrKeyNotFound) {
+		t.Fatalf("Get after DeleteRevision error = %v, want ErrKeyNotFound", err)
+	}
+	// Gone since it was read is a mismatch too, unlike Delete's no-op.
+	if err := kv.DeleteRevision(ctx, key, moved); !errors.Is(err, events.ErrRevisionMismatch) {
+		t.Errorf("DeleteRevision of a deleted key error = %v, want ErrRevisionMismatch", err)
+	}
+	if _, err := kv.Create(ctx, key, []byte("download-3")); err != nil {
+		t.Errorf("Create after DeleteRevision: %v", err)
+	}
+}
+
+func testKVTTL(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	kv := bus.KV(events.BucketLeases)
+	key := events.LeaseKey("movie-ttl")
+
+	if _, err := kv.Create(ctx, key, []byte("cached"), events.WithTTL(time.Second)); err != nil {
+		t.Fatalf("Create with TTL: %v", err)
+	}
+	if _, err := kv.Get(ctx, key); err != nil {
+		t.Fatalf("Get before expiry: %v", err)
+	}
+	waitUntil(t, "the key to expire", func() bool {
+		_, err := kv.Get(ctx, key)
+		return errors.Is(err, events.ErrKeyNotFound)
+	})
+	// Once expired the key may be created again.
+	if _, err := kv.Create(ctx, key, []byte("cached again")); err != nil {
+		t.Errorf("Create after expiry: %v", err)
+	}
+}
+
+func testKVWatch(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	kv := bus.KV(events.BucketProgress)
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	updates, err := kv.Watch(watchCtx, "download.>")
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+
+	if _, err := kv.Put(ctx, "download.uid-1", []byte(`{"percentMilli":42000}`)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	// A key outside the pattern must not be delivered.
+	if _, err := kv.Put(ctx, "transcode.uid-2", []byte(`{"percentMilli":1}`)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	deadline := time.After(Timeout)
+	for {
+		select {
+		case e, ok := <-updates:
+			if !ok {
+				t.Fatal("watch channel closed before the update arrived")
+			}
+			if e.Key == "transcode.uid-2" {
+				t.Fatalf("watcher on %q received %q", "download.>", e.Key)
+			}
+			if e.Key != "download.uid-1" {
+				continue
+			}
+			if string(e.Value) != `{"percentMilli":42000}` {
+				t.Errorf("watched value = %q", e.Value)
+			}
+			return
+		case <-deadline:
+			t.Fatal("timed out waiting for a watch update")
+		}
+	}
+}
+
+// testObjectStorePutGet proves a Put/Get round trip preserves the exact
+// bytes and headers, and that Digest is the hex SHA-256 of the content spec
+// §B.1 documents, not an opaque bus-specific form.
+func testObjectStorePutGet(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	store := bus.ObjectStore(events.BucketArtwork)
+
+	content := []byte("poster bytes for movie/uid-1")
+	sum := sha256.Sum256(content)
+	wantDigest := hex.EncodeToString(sum[:])
+	headers := map[string]string{
+		"Content-Type":    "image/jpeg",
+		"Clustarr-Source": "provider",
+	}
+
+	info, err := store.Put(ctx, "movie/uid-1/poster/original", bytes.NewReader(content), headers)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if len(info.Digest) != 64 {
+		t.Errorf("Put Digest %q is %d chars, want 64 hex chars", info.Digest, len(info.Digest))
+	}
+	if info.Digest != wantDigest {
+		t.Errorf("Put Digest = %q, want %q", info.Digest, wantDigest)
+	}
+	if info.Size != int64(len(content)) {
+		t.Errorf("Put Size = %d, want %d", info.Size, len(content))
+	}
+
+	gotInfo, rc, err := store.Get(ctx, "movie/uid-1/poster/original")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer func() { _ = rc.Close() }()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read Get content: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Errorf("Get content = %q, want %q", got, content)
+	}
+	if gotInfo.Digest != wantDigest {
+		t.Errorf("Get Digest = %q, want %q", gotInfo.Digest, wantDigest)
+	}
+	for k, v := range headers {
+		if gotInfo.Headers[k] != v {
+			t.Errorf("Get Headers[%q] = %q, want %q", k, gotInfo.Headers[k], v)
+		}
+	}
+}
+
+// testObjectStoreOverwrite proves a second Put to the same name changes both
+// the digest and ModTime, so a caller can detect a changed source without
+// comparing bytes (spec §B.4's "source URL differs" check reads
+// status.artwork, not the object, but the reaper and any future diffing
+// depend on ModTime and Digest actually moving on a real overwrite).
+func testObjectStoreOverwrite(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	store := bus.ObjectStore(events.BucketArtwork)
+	name := "movie/uid-2/poster/original"
+
+	first, err := store.Put(ctx, name, bytes.NewReader([]byte("v1")), nil)
+	if err != nil {
+		t.Fatalf("first Put: %v", err)
+	}
+	// A real clock's resolution is fine-grained enough that two sequential
+	// calls virtually never tie, but this removes any doubt rather than
+	// leaving the assertion to chance.
+	time.Sleep(2 * time.Millisecond)
+	second, err := store.Put(ctx, name, bytes.NewReader([]byte("v2, a longer body")), nil)
+	if err != nil {
+		t.Fatalf("second Put: %v", err)
+	}
+
+	if second.Digest == first.Digest {
+		t.Errorf("Digest did not change across overwrite: %q", second.Digest)
+	}
+	if !second.ModTime.After(first.ModTime) {
+		t.Errorf("ModTime did not advance across overwrite: first=%v second=%v",
+			first.ModTime, second.ModTime)
+	}
+
+	info, err := store.Info(ctx, name)
+	if err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+	if info.Digest != second.Digest {
+		t.Errorf("Info Digest = %q after overwrite, want %q", info.Digest, second.Digest)
+	}
+	// Info's ModTime need not be bit-identical to what the second Put
+	// returned: on a real server, jetstream.ObjectStore.Put stamps its
+	// returned ObjectInfo with a client-side time.Now() taken before the
+	// object is durably written (nats.go's object.go says so verbatim --
+	// "This time is not actually the correct time"), while a later Info
+	// reads the persisted meta message's own server-side timestamp; the two
+	// were observed a few dozen microseconds apart. What the contract
+	// promises is that Info moves forward with the overwrite, not that it
+	// echoes Put's estimate.
+	if !info.ModTime.After(first.ModTime) {
+		t.Errorf("Info ModTime = %v did not advance past the pre-overwrite value %v",
+			info.ModTime, first.ModTime)
+	}
+}
+
+// testObjectStoreInfoMissing proves Info and Get on an object that was never
+// written both fail ErrObjectNotFound rather than returning a zero value.
+func testObjectStoreInfoMissing(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	store := bus.ObjectStore(events.BucketArtwork)
+	name := "movie/uid-does-not-exist/poster/original"
+
+	if _, err := store.Info(ctx, name); !errors.Is(err, events.ErrObjectNotFound) {
+		t.Fatalf("Info on a missing object error = %v, want ErrObjectNotFound", err)
+	}
+	if _, _, err := store.Get(ctx, name); !errors.Is(err, events.ErrObjectNotFound) {
+		t.Fatalf("Get on a missing object error = %v, want ErrObjectNotFound", err)
+	}
+}
+
+// testObjectStoreDeleteThenGet proves the full Delete contract on both
+// buses: a name that was never written is ErrObjectNotFound; deleting an
+// object that exists succeeds; deleting it again is ErrObjectNotFound, not
+// a silent no-op; and Get afterward is ErrObjectNotFound.
+//
+// The second-Delete case is the one a real server does not give for free:
+// jetstream.ObjectStore.Delete treats an already-deleted object (a
+// soft-delete tombstone still on record) as idempotent and returns nil on
+// its own, reserving ErrObjectNotFound for a name that was never Put at all
+// (verified against the embedded server, not assumed). natsbus checks
+// GetInfo -- which hides deleted objects exactly like Get does -- before
+// calling Delete, so both "never written" and "already deleted" surface as
+// ErrObjectNotFound the same way membus's map-delete does. Both buses must
+// agree here: a caller (the reaper, spec §B.5) that deletes an object twice
+// because two replicas raced must see the same error either way.
+func testObjectStoreDeleteThenGet(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	store := bus.ObjectStore(events.BucketArtwork)
+	name := "movie/uid-3/poster/original"
+	neverWritten := "movie/uid-3/poster/never-written"
+
+	if err := store.Delete(ctx, neverWritten); !errors.Is(err, events.ErrObjectNotFound) {
+		t.Fatalf("Delete of a name never written error = %v, want ErrObjectNotFound", err)
+	}
+	if _, err := store.Put(ctx, name, bytes.NewReader([]byte("v1")), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := store.Delete(ctx, name); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if err := store.Delete(ctx, name); !errors.Is(err, events.ErrObjectNotFound) {
+		t.Fatalf("second Delete error = %v, want ErrObjectNotFound", err)
+	}
+	if _, _, err := store.Get(ctx, name); !errors.Is(err, events.ErrObjectNotFound) {
+		t.Fatalf("Get after Delete error = %v, want ErrObjectNotFound", err)
+	}
+	if _, err := store.Info(ctx, name); !errors.Is(err, events.ErrObjectNotFound) {
+		t.Fatalf("Info after Delete error = %v, want ErrObjectNotFound", err)
+	}
+}
+
+// testObjectStoreListByPrefix proves List("movie/") returns only objects
+// under that prefix, in name order, leaving siblings under other prefixes
+// out -- the property the reaper (spec §B.5) depends on to walk one kind at
+// a time.
+func testObjectStoreListByPrefix(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	store := bus.ObjectStore(events.BucketArtwork)
+
+	put := func(name string) {
+		t.Helper()
+		if _, err := store.Put(ctx, name, bytes.NewReader([]byte(name)), nil); err != nil {
+			t.Fatalf("Put %s: %v", name, err)
+		}
+	}
+	put("movie/uid-5/poster/original")
+	put("movie/uid-5/fanart/original")
+	put("movie/uid-6/poster/original")
+	put("series/uid-7/poster/original")
+
+	got, err := store.List(ctx, "movie/")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := []string{
+		"movie/uid-5/fanart/original",
+		"movie/uid-5/poster/original",
+		"movie/uid-6/poster/original",
+	}
+	if len(got) != len(want) {
+		names := make([]string, len(got))
+		for i, info := range got {
+			names[i] = info.Name
+		}
+		t.Fatalf("List(%q) = %v, want %v", "movie/", names, want)
+	}
+	for i, w := range want {
+		if got[i].Name != w {
+			t.Errorf("List(%q)[%d] = %q, want %q", "movie/", i, got[i].Name, w)
+		}
+	}
+}
+
+func testRequestReply(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+
+	type request struct {
+		Text string `json:"text"`
+	}
+	type response struct {
+		Releases int    `json:"releases"`
+		Echo     string `json:"echo"`
+	}
+
+	err := bus.Serve(events.RPCIndexSearch, events.QueueGroupIndexarr,
+		func(_ context.Context, data []byte) ([]byte, error) {
+			var in request
+			if err := json.Unmarshal(data, &in); err != nil {
+				return nil, err
+			}
+			return json.Marshal(response{Releases: 3, Echo: in.Text})
+		})
+	if err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+
+	var out response
+	if err := bus.Request(ctx, events.RPCIndexSearch, request{Text: "arrival 2016"}, &out); err != nil {
+		t.Fatalf("Request: %v", err)
+	}
+	if out.Releases != 3 || out.Echo != "arrival 2016" {
+		t.Errorf("response = %+v", out)
+	}
+
+	unserved := events.RPCMetadataResolve
+	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	err = bus.Request(reqCtx, unserved, request{Text: "x"}, &out)
+	if !errors.Is(err, events.ErrNoResponders) && !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Request to an unserved subject error = %v, want ErrNoResponders", err)
+	}
+}
+
+func testUnknownSubject(t *testing.T, newBus func() events.Bus) {
+	ctx, bus := setup(t, newBus)
+	_, err := bus.Publish(ctx, "clustarr.nope.nothing.here",
+		envelope("x", "none.v1", map[string]string{}))
+	if err == nil {
+		t.Fatal("Publish to a subject with no stream succeeded")
+	}
+}
+
+// hooksCtxKey is the context key the hook cases' synthetic AfterReceive hook
+// uses to hand the extracted trace to the handler. It is local to this test
+// file, not events.HeaderTrace or pkg/obs/tracing, because pkg/events must
+// not import pkg/obs and this suite proves the bus calls the hooks correctly
+// without depending on what a real observability hook does with them.
+type hooksCtxKey struct{}
+
+// hookDelivery is what a hook-case handler reports back about one delivery:
+// the trace carried by the wire envelope it received, and what -- if
+// anything -- the AfterReceive hook stashed on its context.
+type hookDelivery struct {
+	envTrace string
+	ctxTrace string
+	ctxSet   bool
+}
+
+// subscribeForHooks subscribes a handler that reports each delivery's
+// envelope trace and hook-stamped context value to the returned channel.
+func subscribeForHooks(t *testing.T, ctx context.Context, bus events.Bus, durable string) chan hookDelivery {
+	t.Helper()
+	got := make(chan hookDelivery, 1)
+	stop, err := bus.Subscribe(ctx, events.Subscription{
+		Stream:      events.StreamEvents,
+		Durable:     durable,
+		Filters:     []string{events.FilterAllEvents},
+		AckWait:     5 * time.Second,
+		MaxDeliver:  3,
+		Backoff:     []time.Duration{50 * time.Millisecond},
+		MaxInFlight: 4,
+	}, func(ctx context.Context, m events.Message) error {
+		v, ok := ctx.Value(hooksCtxKey{}).(string)
+		select {
+		case got <- hookDelivery{envTrace: m.Envelope().Trace, ctxTrace: v, ctxSet: ok}:
+		default:
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	t.Cleanup(stop)
+	return got
+}
+
+// testHooksContract covers Task C1: a BeforePublish hook must stamp the
+// outbound envelope before it is encoded onto the wire, an AfterReceive hook
+// must run before the handler and its returned context must be what the
+// handler receives, and with no hooks installed neither must happen and
+// nothing must break.
+func testHooksContract(t *testing.T, newBus func() events.Bus,
+	newBusWithHooks func(events.Hooks) events.Bus,
+) {
+	const wantTrace = "00-11112222333344445555666677778888-9999aaaabbbbcccc-01"
+
+	t.Run("HooksInstalledStampAndPropagate", func(t *testing.T) {
+		hooks := events.Hooks{
+			BeforePublish: func(_ context.Context, e *events.Envelope) {
+				e.Trace = wantTrace
+			},
+			AfterReceive: func(ctx context.Context, e *events.Envelope) context.Context {
+				return context.WithValue(ctx, hooksCtxKey{}, e.Trace)
+			},
+		}
+		ctx, bus := setup(t, func() events.Bus { return newBusWithHooks(hooks) })
+		got := subscribeForHooks(t, ctx, bus, "ct-hooks-on")
+
+		subject := events.CatalogItemSubject("movie", events.ActionAdded, "uid-hooks-on")
+		env := envelope("evt-hooks-on", "catalog.ItemEvent.v1", map[string]string{"k": "v"})
+		env.Trace = "" // the hook, not this field, must be what stamps it
+		if _, err := bus.Publish(ctx, subject, env); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+
+		select {
+		case d := <-got:
+			if d.envTrace != wantTrace {
+				t.Errorf("delivered Envelope.Trace = %q, want %q (BeforePublish should have stamped it "+
+					"before encoding)", d.envTrace, wantTrace)
+			}
+			if !d.ctxSet || d.ctxTrace != wantTrace {
+				t.Errorf("handler context trace = (set=%v) %q, want %q from AfterReceive",
+					d.ctxSet, d.ctxTrace, wantTrace)
+			}
+		case <-time.After(Timeout):
+			t.Fatal("handler was never invoked")
+		}
+	})
+
+	t.Run("NoHooksIsANoOp", func(t *testing.T) {
+		ctx, bus := setup(t, newBus)
+		got := subscribeForHooks(t, ctx, bus, "ct-hooks-off")
+
+		subject := events.CatalogItemSubject("movie", events.ActionAdded, "uid-hooks-off")
+		env := envelope("evt-hooks-off", "catalog.ItemEvent.v1", map[string]string{"k": "v"})
+		env.Trace = ""
+		if _, err := bus.Publish(ctx, subject, env); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+
+		select {
+		case d := <-got:
+			if d.envTrace != "" {
+				t.Errorf("delivered Envelope.Trace = %q, want empty with no hooks installed", d.envTrace)
+			}
+			if d.ctxSet {
+				t.Errorf("handler context carried the hook's key (%q) with no hooks installed", d.ctxTrace)
+			}
+		case <-time.After(Timeout):
+			t.Fatal("handler was never invoked")
+		}
+	})
+
+	// The two cases below hold each hook to firing independently: a nil
+	// BeforePublish must not stop AfterReceive from running, and a nil
+	// AfterReceive must not stop BeforePublish from stamping the wire
+	// envelope. Both RunBeforePublish and RunAfterReceive nil-check their
+	// own field only, so this is a low-risk regression lock, not a case
+	// expected to find a new bug.
+
+	t.Run("OnlyBeforePublishSet", func(t *testing.T) {
+		hooks := events.Hooks{
+			BeforePublish: func(_ context.Context, e *events.Envelope) {
+				e.Trace = wantTrace
+			},
+			// AfterReceive is deliberately nil.
+		}
+		ctx, bus := setup(t, func() events.Bus { return newBusWithHooks(hooks) })
+		got := subscribeForHooks(t, ctx, bus, "ct-hooks-before-only")
+
+		subject := events.CatalogItemSubject("movie", events.ActionAdded, "uid-hooks-before-only")
+		env := envelope("evt-hooks-before-only", "catalog.ItemEvent.v1", map[string]string{"k": "v"})
+		env.Trace = ""
+		if _, err := bus.Publish(ctx, subject, env); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+
+		select {
+		case d := <-got:
+			if d.envTrace != wantTrace {
+				t.Errorf("delivered Envelope.Trace = %q, want %q (BeforePublish alone should still "+
+					"stamp it)", d.envTrace, wantTrace)
+			}
+			if d.ctxSet {
+				t.Errorf("handler context carried the hook's key (%q) with AfterReceive nil", d.ctxTrace)
+			}
+		case <-time.After(Timeout):
+			t.Fatal("handler was never invoked")
+		}
+	})
+
+	t.Run("OnlyAfterReceiveSet", func(t *testing.T) {
+		hooks := events.Hooks{
+			// BeforePublish is deliberately nil.
+			AfterReceive: func(ctx context.Context, e *events.Envelope) context.Context {
+				return context.WithValue(ctx, hooksCtxKey{}, e.Trace)
+			},
+		}
+		ctx, bus := setup(t, func() events.Bus { return newBusWithHooks(hooks) })
+		got := subscribeForHooks(t, ctx, bus, "ct-hooks-after-only")
+
+		subject := events.CatalogItemSubject("movie", events.ActionAdded, "uid-hooks-after-only")
+		env := envelope("evt-hooks-after-only", "catalog.ItemEvent.v1", map[string]string{"k": "v"})
+		env.Trace = ""
+		if _, err := bus.Publish(ctx, subject, env); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+
+		select {
+		case d := <-got:
+			if d.envTrace != "" {
+				t.Errorf("delivered Envelope.Trace = %q, want empty with BeforePublish nil", d.envTrace)
+			}
+			if !d.ctxSet || d.ctxTrace != "" {
+				t.Errorf("handler context trace = (set=%v) %q, want set=true value=\"\" from "+
+					"AfterReceive (it must still run even though BeforePublish is nil)",
+					d.ctxSet, d.ctxTrace)
+			}
+		case <-time.After(Timeout):
+			t.Fatal("handler was never invoked")
+		}
+	})
+
+	// RPC request/reply must be held to the same contract as publish/
+	// subscribe: BeforePublish runs on the outbound request (a request IS a
+	// publish) and AfterReceive runs on the inbound request before the
+	// responder's handler, so a handler's own spans and any outbound calls
+	// it makes are children of the caller's trace rather than orphaned
+	// roots. The reply leg is deliberately NOT run through the hooks -- see
+	// natsbus.Bus.Request's doc comment for why: a request/reply round trip
+	// is synchronous from the caller's point of view, so there is no second,
+	// independent hop for a hook to bridge on the way back.
+
+	t.Run("RPCRequestReplyPropagatesTrace", func(t *testing.T) {
+		hooks := events.Hooks{
+			BeforePublish: func(_ context.Context, e *events.Envelope) {
+				e.Trace = wantTrace
+			},
+			AfterReceive: func(ctx context.Context, e *events.Envelope) context.Context {
+				return context.WithValue(ctx, hooksCtxKey{}, e.Trace)
+			},
+		}
+		ctx, bus := setup(t, func() events.Bus { return newBusWithHooks(hooks) })
+		got := make(chan hookDelivery, 1)
+
+		err := bus.Serve(events.RPCIndexSearch, events.QueueGroupIndexarr,
+			func(ctx context.Context, _ []byte) ([]byte, error) {
+				v, ok := ctx.Value(hooksCtxKey{}).(string)
+				select {
+				case got <- hookDelivery{ctxTrace: v, ctxSet: ok}:
+				default:
+				}
+				return []byte(`{}`), nil
+			})
+		if err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+
+		var out map[string]any
+		if err := bus.Request(ctx, events.RPCIndexSearch, map[string]string{"k": "v"}, &out); err != nil {
+			t.Fatalf("Request: %v", err)
+		}
+
+		select {
+		case d := <-got:
+			if !d.ctxSet || d.ctxTrace != wantTrace {
+				t.Errorf("RPC handler context trace = (set=%v) %q, want %q from AfterReceive",
+					d.ctxSet, d.ctxTrace, wantTrace)
+			}
+		case <-time.After(Timeout):
+			t.Fatal("RPC handler was never invoked")
+		}
+	})
+
+	t.Run("RPCRequestReplyNoHooksIsANoOp", func(t *testing.T) {
+		ctx, bus := setup(t, newBus)
+		got := make(chan hookDelivery, 1)
+
+		err := bus.Serve(events.RPCIndexSearch, events.QueueGroupIndexarr,
+			func(ctx context.Context, _ []byte) ([]byte, error) {
+				v, ok := ctx.Value(hooksCtxKey{}).(string)
+				select {
+				case got <- hookDelivery{ctxTrace: v, ctxSet: ok}:
+				default:
+				}
+				return []byte(`{}`), nil
+			})
+		if err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+
+		var out map[string]any
+		if err := bus.Request(ctx, events.RPCIndexSearch, map[string]string{"k": "v"}, &out); err != nil {
+			t.Fatalf("Request: %v", err)
+		}
+
+		select {
+		case d := <-got:
+			if d.ctxSet {
+				t.Errorf("RPC handler context carried the hook's key (%q) with no hooks installed",
+					d.ctxTrace)
+			}
+		case <-time.After(Timeout):
+			t.Fatal("RPC handler was never invoked")
+		}
+	})
+}

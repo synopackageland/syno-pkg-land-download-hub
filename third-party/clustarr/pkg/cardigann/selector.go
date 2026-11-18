@@ -1,0 +1,526 @@
+/*
+Copyright 2026 The Clustarr Authors.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+package cardigann
+
+import (
+	"bytes"
+	"context"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"io"
+	"regexp"
+	"strings"
+
+	"github.com/PuerkitoBio/goquery"
+	"github.com/tidwall/gjson"
+	"golang.org/x/net/html"
+)
+
+// ResponseType selects which of the three selector backends a Doc uses.
+type ResponseType int
+
+const (
+	ResponseHTML ResponseType = iota
+	ResponseJSON
+	ResponseXML
+)
+
+// jsonBracketIndex rewrites Cardigann's `foo[0].bar` array-index syntax
+// (0dayfiles-api.yml's title_filename: `files[0].name`) into gjson's own
+// `foo.0.bar` dot-index syntax before every JSON selector lookup: verified
+// against gjson v1.19.0, `Get(json, "files[0].name")` does not match at
+// all (bracket indices are not gjson path syntax), only `"files.0.name"`
+// does.
+var jsonBracketIndex = regexp.MustCompile(`\[(\d+)\]`)
+
+// jsonPath rewrites a Cardigann JSON selector into a gjson path (see
+// jsonBracketIndex). Leading dots are dropped, as Prowlarr's HandleJsonSelector drops them
+// (Selector.TrimStart('.')): ".title" is "title", and the ".." prefix that
+// means "the parent row" (see searchRow) has already chosen which Doc the
+// path runs against by the time it gets here. Left in, a leading ".." is
+// gjson's JSON Lines syntax and matches nothing a Cardigann author meant.
+//
+// A leading "$" (JSON.NET's root, which Prowlarr's SelectToken accepts) is
+// dropped too; an empty path is the node itself (see jsonGet).
+func jsonPath(selector string) string {
+	// The index rewrite runs first: "$[0].id" becomes ".0.id", whose leading
+	// dot gjson reads as JSON Lines and matches nothing.
+	return strings.TrimLeft(jsonBracketIndex.ReplaceAllString(strings.TrimPrefix(selector, "$"), ".$1"), ".")
+}
+
+// jsonGet is d.Get(jsonPath(selector)), except that a selector naming the
+// node itself ("", "$", ".") returns the node, where gjson would return
+// nothing.
+func jsonGet(d gjson.Result, selector string) gjson.Result {
+	p := jsonPath(selector)
+	if p == "" {
+		return d
+	}
+	return d.Get(p)
+}
+
+// jsonFilter is one :has(key), :not(key) or :contains(text) suffix on a JSON
+// selector -- Prowlarr's JsonParseFieldSelector, which gives JSON
+// definitions the few CSS pseudo-classes they use: a freeleech-only rows
+// selector "data.data:not(freeleech_blocked)", a field "ref_id:contains(tt)".
+type jsonFilter struct{ name, key string }
+
+// splitJSONFilters splits a JSON selector into its path (everything before
+// the first ":", as Prowlarr's Split(':')[0]) and its filters, parsed as
+// Prowlarr's _jsonSelectorRegex matches them,
+// `\:(?<filter>.+?)\((?<key>.+?)\)(?=:|\z)`: the name runs to the first
+// "(", the key to the first ")" that ends the selector or precedes a ":".
+func splitJSONFilters(selector string) (string, []jsonFilter) {
+	i := strings.IndexByte(selector, ':')
+	if i < 0 {
+		return selector, nil
+	}
+	base, rest := selector[:i], selector[i:]
+	var filters []jsonFilter
+	for len(rest) > 1 && rest[0] == ':' {
+		open := strings.IndexByte(rest[2:], '(')
+		if open < 0 {
+			break
+		}
+		open += 2
+		end := -1
+		for k := open + 2; k < len(rest); k++ {
+			if rest[k] == ')' && (k+1 == len(rest) || rest[k+1] == ':') {
+				end = k
+				break
+			}
+		}
+		if end < 0 {
+			break
+		}
+		filters = append(filters, jsonFilter{name: rest[1:open], key: rest[open+1 : end]})
+		rest = rest[end+1:]
+	}
+	return base, filters
+}
+
+// jsonSelect is Select on JSON: the path's node, provided every filter
+// holds on it.
+func jsonSelect(d gjson.Result, selector string) (gjson.Result, bool) {
+	base, filters := splitJSONFilters(selector)
+	r := jsonGet(d, base)
+	if !r.Exists() {
+		return gjson.Result{}, false
+	}
+	for _, f := range filters {
+		if !f.holds(r) {
+			return gjson.Result{}, false
+		}
+	}
+	return r, true
+}
+
+// holds evaluates one filter on r. An unknown filter name is ignored, as
+// Prowlarr logs it and carries on.
+func (f jsonFilter) holds(r gjson.Result) bool {
+	switch f.name {
+	case "has", "not":
+		var found bool
+		if _, nested := splitJSONFilters(f.key); nested != nil {
+			_, found = jsonSelect(r, f.key)
+		} else {
+			found = jsonGet(r, f.key).Exists()
+		}
+		return found == (f.name == "has")
+	case "contains":
+		text := r.Raw
+		if r.Type == gjson.String {
+			text = r.String()
+		}
+		return strings.Contains(text, f.key)
+	default:
+		return true
+	}
+}
+
+// Doc wraps one parsed response body (or a sub-node of one) so
+// SelectorBlock evaluation, row iteration and the filter chain never
+// branch on the underlying parser themselves.
+//
+// HTML and XML share one backend: a DOM queried with CSS selectors. That is
+// Prowlarr's model -- it parses an XML response with AngleSharp's
+// XmlParser and runs the same QuerySelector calls over it -- and it is what
+// every XML definition in the v11 corpus is written for ("rss > channel >
+// item", "[name=seeders]"). This package used to query XML with XPath
+// through xmlquery, whose Find panics on a CSS selector: every corpus XML
+// definition would have crashed the search.
+type Doc struct {
+	rt   ResponseType
+	html *goquery.Selection
+	json gjson.Result
+}
+
+// dom reports whether d is queried with CSS (HTML or XML).
+func (d Doc) dom() bool { return d.rt == ResponseHTML || d.rt == ResponseXML }
+
+// ParseDoc parses body as rt.
+func ParseDoc(rt ResponseType, body []byte) (Doc, error) {
+	switch rt {
+	case ResponseHTML:
+		d, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
+		if err != nil {
+			return Doc{}, fmt.Errorf("cardigann: parse html: %w", err)
+		}
+		return Doc{rt: rt, html: d.Selection}, nil
+	case ResponseJSON:
+		if !gjson.ValidBytes(body) {
+			return Doc{}, fmt.Errorf("cardigann: invalid json response")
+		}
+		return Doc{rt: rt, json: gjson.ParseBytes(body)}, nil
+	case ResponseXML:
+		root, err := parseXML(body)
+		if err != nil {
+			return Doc{}, err
+		}
+		return Doc{rt: rt, html: goquery.NewDocumentFromNode(root).Selection}, nil
+	default:
+		return Doc{}, fmt.Errorf("cardigann: unknown response type %d", rt)
+	}
+}
+
+// parseXML builds an XML response into the same node tree the HTML parser
+// produces, so CSS selectors (cascadia, through goquery) run over it.
+// Element and attribute names are lower-cased because cascadia lower-cases
+// a selector's names ("pubDate" matches <pubDate>); a namespace prefix is
+// dropped, so <torznab:attr name="seeders"> is attr[name=seeders]. It does
+// not go through the HTML parser, which would treat RSS's <link> as the
+// void HTML element and lose its text. The body has already been decoded
+// to UTF-8 (decodeBody), so an encoding the XML declaration names is not
+// applied a second time -- as AngleSharp, parsing a decoded string, ignores
+// it. HTML entities are accepted, since trackers' feeds use them.
+func parseXML(body []byte) (*html.Node, error) {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, fmt.Errorf("cardigann: parse xml: empty response")
+	}
+	dec := xml.NewDecoder(bytes.NewReader(body))
+	dec.Strict = true
+	dec.Entity = xml.HTMLEntity
+	dec.CharsetReader = func(_ string, r io.Reader) (io.Reader, error) { return r, nil }
+
+	root := &html.Node{Type: html.DocumentNode}
+	cur := root
+	elements := 0
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("cardigann: parse xml: %w", err)
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			n := &html.Node{Type: html.ElementNode, Data: strings.ToLower(t.Name.Local)}
+			for _, a := range t.Attr {
+				n.Attr = append(n.Attr, html.Attribute{Key: strings.ToLower(a.Name.Local), Val: a.Value})
+			}
+			cur.AppendChild(n)
+			cur = n
+			elements++
+		case xml.EndElement:
+			if cur.Parent != nil {
+				cur = cur.Parent
+			}
+		case xml.CharData:
+			cur.AppendChild(&html.Node{Type: html.TextNode, Data: string(t)})
+		}
+	}
+	if elements == 0 {
+		return nil, fmt.Errorf("cardigann: parse xml: no root element")
+	}
+	return root, nil
+}
+
+// Select narrows d to the first match of selector (CSS for HTML and XML, a
+// gjson path for JSON); ok is false on no match.
+func (d Doc) Select(selector string) (Doc, bool) {
+	switch {
+	case d.dom():
+		if d.html == nil {
+			return Doc{}, false
+		}
+		sel := d.html.Find(selector)
+		if sel.Length() == 0 {
+			return Doc{}, false
+		}
+		return Doc{rt: d.rt, html: sel}, true
+	case d.rt == ResponseJSON:
+		r, ok := jsonSelect(d.json, selector)
+		if !ok {
+			return Doc{}, false
+		}
+		return Doc{rt: d.rt, json: r}, true
+	}
+	return Doc{}, false
+}
+
+// Rows returns every match of selector as its own Doc — goquery's
+// *Selection.Each for HTML and XML, gjson's array iteration for JSON.
+func (d Doc) Rows(selector string) []Doc {
+	switch {
+	case d.dom():
+		if d.html == nil {
+			return nil
+		}
+		var out []Doc
+		d.html.Find(selector).Each(func(_ int, s *goquery.Selection) { out = append(out, Doc{rt: d.rt, html: s}) })
+		return out
+	case d.rt == ResponseJSON:
+		// Prowlarr's JsonParseRowsSelector: the filters apply to each row,
+		// not to the array.
+		base, filters := splitJSONFilters(selector)
+		var out []Doc
+		jsonGet(d.json, base).ForEach(func(_, v gjson.Result) bool {
+			for _, f := range filters {
+				if !f.holds(v) {
+					return true
+				}
+			}
+			out = append(out, Doc{rt: d.rt, json: v})
+			return true
+		})
+		return out
+	}
+	return nil
+}
+
+// elements returns each element of a JSON array as its own Doc (nil for
+// anything else) -- rows.multiple's expansion.
+func (d Doc) elements() []Doc {
+	if d.rt != ResponseJSON || !d.json.IsArray() {
+		return nil
+	}
+	var out []Doc
+	d.json.ForEach(func(_, v gjson.Result) bool {
+		out = append(out, Doc{rt: d.rt, json: v})
+		return true
+	})
+	return out
+}
+
+// absorb moves every child node of other (text included, as Prowlarr moves
+// ChildNodes) to the end of d: rows.after's merge. HTML and XML only; the
+// emptied row stays in the document, where it can still be walked past by
+// prevRow.
+func (d Doc) absorb(other Doc) {
+	if d.dom() && d.html != nil && other.html != nil {
+		d.html.AppendSelection(other.html.Contents())
+	}
+}
+
+// prevRow is the row before d for rows.dateheaders: its previous element
+// sibling, or -- when d is first in its parent -- the parent's previous
+// element sibling (CardigannParser's PreviousElementSibling/ParentElement
+// walk). ok is false when there is none. JSON rows have no siblings.
+func (d Doc) prevRow() (Doc, bool) {
+	if !d.dom() || d.html == nil || d.html.Length() == 0 {
+		return Doc{}, false
+	}
+	cur := d.html.First()
+	prev := cur.Prev()
+	if prev.Length() == 0 {
+		prev = cur.Parent().Prev()
+	}
+	if prev.Length() == 0 {
+		return Doc{}, false
+	}
+	return Doc{rt: d.rt, html: prev}, true
+}
+
+// matches reports whether d itself (not a descendant) matches selector:
+// Prowlarr's HandleSelector tries dom.Matches(selector) before
+// QuerySelector, so a dateheaders selector naming the header row's own
+// class matches the header row.
+func (d Doc) matches(selector string) bool {
+	return d.dom() && d.html != nil && d.html.Is(selector)
+}
+
+// Text reads d's text (attribute == "" for HTML and XML, ignored for JSON)
+// or a named attribute (an element attribute for HTML and XML -- matched
+// lower-cased on XML, as parseXML stores it -- or one more gjson descent
+// step for JSON, which matches RowsBlock.Attribute's "descend one more
+// level" semantics from note §3.6); ok is false when attribute doesn't
+// exist.
+//
+// For a JSON array with no further attribute descent, the elements are
+// joined with "," rather than returned as raw JSON text (e.g.
+// `["Action","Sci-Fi"]`): this is what makes a plain re_replace/split
+// filter chain on a genre-like field operate on sane plain text instead of
+// bracket-and-quote-laden JSON source (0dayfiles-api.yml's genre field,
+// `selector: meta.genres`, relies on this).
+func (d Doc) Text(attribute string) (string, bool) {
+	switch {
+	case d.dom():
+		if d.html == nil || d.html.Length() == 0 {
+			return "", false
+		}
+		if attribute == "" {
+			return strings.TrimSpace(d.html.Text()), true
+		}
+		if d.rt == ResponseXML {
+			attribute = strings.ToLower(attribute)
+		}
+		return d.html.Attr(attribute)
+	case d.rt == ResponseJSON:
+		if attribute != "" {
+			sub, ok := d.Select(attribute)
+			if !ok {
+				return "", false
+			}
+			return sub.Text("")
+		}
+		if !d.json.Exists() {
+			return "", false
+		}
+		if d.json.IsArray() {
+			var parts []string
+			d.json.ForEach(func(_, v gjson.Result) bool { parts = append(parts, v.String()); return true })
+			return strings.Join(parts, ","), true
+		}
+		return d.json.String(), true
+	}
+	return "", false
+}
+
+// Extract evaluates b against d: Text (literal/template) short-circuits
+// Selector and Case; otherwise Selector+Attribute narrows d, Remove strips a
+// nested selector first (HTML only), Case maps the selection (see
+// caseValue), then Filters run in order. ok is false when Selector matched
+// nothing and b.Optional with no Default — callers use this to implement the
+// non-optional-field-drops-the-row rule (note §3.8).
+func (b SelectorBlock) Extract(ctx context.Context, d Doc, tc *TemplateContext) (string, bool, error) {
+	raw, ok, err := b.extractRaw(ctx, d, tc)
+	if err != nil || !ok {
+		return "", false, err
+	}
+	for _, f := range b.Filters {
+		fn, known := Filters[f.Name]
+		if !known {
+			return "", false, fmt.Errorf("cardigann: unknown filter %q", f.Name)
+		}
+		raw, err = fn(ctx, raw, []string(f.Args), tc)
+		if err != nil {
+			return "", false, fmt.Errorf("cardigann: filter %q: %w", f.Name, err)
+		}
+	}
+	return raw, true, nil
+}
+
+// extractRaw resolves Text, or Selector+Remove then Case or Attribute, into
+// a raw string before Filters run -- Prowlarr's HandleSelector /
+// HandleJsonSelector order: a Text block returns its template and never
+// consults Case.
+func (b SelectorBlock) extractRaw(_ context.Context, d Doc, tc *TemplateContext) (string, bool, error) {
+	if b.Text != nil {
+		rendered, err := render(string(*b.Text), tc)
+		if err != nil {
+			return "", false, err
+		}
+		return rendered, true, nil
+	}
+
+	sel := d
+	if b.Selector != "" {
+		// Selector is itself a template (e.g. 1337x's rows.selector,
+		// `tr:has(...){{ if .Config.uploader }}...{{ end }}`, and its
+		// download selectors, `a[href*="{{ .Config.primarydownloadlink }}"]`)
+		// — render it before handing it to the CSS or gjson backend.
+		renderedSelector, err := render(b.Selector, tc)
+		if err != nil {
+			return "", false, err
+		}
+		found, ok := d.Select(renderedSelector)
+		if !ok {
+			return b.optionalFallback()
+		}
+		sel = found
+	}
+	if b.Remove != "" && sel.dom() && sel.html != nil {
+		sel.html.Find(b.Remove).Remove()
+	}
+	if len(b.Case) > 0 && sel.dom() {
+		return b.htmlCase(sel, tc)
+	}
+	raw, ok := sel.Text(b.Attribute)
+	if !ok {
+		return b.optionalFallback()
+	}
+	if len(b.Case) > 0 {
+		return b.valueCase(raw, tc)
+	}
+	return raw, true, nil
+}
+
+// htmlCase is Case on an HTML or XML selection. Each key is a CSS selector, tried
+// in file order against the selection itself and then its descendants
+// (Prowlarr: `selection.Matches(key) || QuerySelector(selection, key) !=
+// null`); the first that matches renders its value. "*" is simply the
+// universal selector, so written last it is the fallback. When nothing
+// matches the field is missing, as Prowlarr's null is. This replaced a
+// value-equality lookup that compared each CSS selector to the row's text,
+// so a freeleech `img.free: 0` never matched and every HTML tracker's
+// volume factors fell through to "*".
+func (b SelectorBlock) htmlCase(sel Doc, tc *TemplateContext) (string, bool, error) {
+	for _, c := range b.Case {
+		if sel.html.Is(c.Key) || sel.html.Find(c.Key).Length() > 0 {
+			rendered, err := render(string(c.Value), tc)
+			if err != nil {
+				return "", false, err
+			}
+			return rendered, true, nil
+		}
+	}
+	return b.optionalFallback()
+}
+
+// valueCase is Case on a JSON value: the first key equal to raw, or "*", in
+// file order, renders its value; no match keeps raw (Prowlarr's
+// HandleJsonSelector). Keys are compared verbatim, which matches both the
+// corpus's case-sensitive keys (freeleech's "100%"/"0%") and its
+// True/False-as-bareword-YAML-key idiom, which goccy/go-yaml decodes to the
+// lower-case "true"/"false" gjson's boolean String() also produces.
+func (b SelectorBlock) valueCase(raw string, tc *TemplateContext) (string, bool, error) {
+	for _, c := range b.Case {
+		if c.Key == raw || c.Key == "*" {
+			rendered, err := render(string(c.Value), tc)
+			if err != nil {
+				return "", false, err
+			}
+			return rendered, true, nil
+		}
+	}
+	return raw, true, nil
+}
+
+// optionalFallback is what Extract returns when a selector matched
+// nothing: b.Default when set (implies b.Optional per the schema's
+// dependentRequired), else (false, nil) — the caller (RowsBlock iteration
+// / field mapping in search.go) is what turns a non-optional miss into
+// "drop this row", not Extract itself.
+func (b SelectorBlock) optionalFallback() (string, bool, error) {
+	if b.Default != nil {
+		return string(*b.Default), true, nil
+	}
+	return "", false, nil
+}

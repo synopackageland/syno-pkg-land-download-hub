@@ -1,0 +1,530 @@
+{
+  "app.status": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "binaries.check": {
+    "permission": "administrators",
+    "effect": "read"
+  },
+  "binaries.rollback": {
+    "permission": "administrators",
+    "effect": "write"
+  },
+  "binaries.status": {
+    "permission": "administrators",
+    "effect": "read"
+  },
+  "binaries.update": {
+    "permission": "administrators",
+    "effect": "write"
+  },
+  "delegate.audit": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "delegate.create": {
+    "permission": "authenticated",
+    "effect": "destructive"
+  },
+  "delegate.destination": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "delegate.disable": {
+    "permission": "administrators",
+    "effect": "destructive"
+  },
+  "delegate.enable": {
+    "permission": "administrators",
+    "effect": "destructive"
+  },
+  "delegate.example.export": {
+    "permission": "authenticated",
+    "effect": "destructive"
+  },
+  "delegate.jobs.cancel": {
+    "permission": "authenticated",
+    "effect": "destructive"
+  },
+  "delegate.jobs.list": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "delegate.jobs.submit": {
+    "permission": "authenticated",
+    "effect": "destructive"
+  },
+  "delegate.list": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "delegate.move_from_staging": {
+    "permission": "authenticated",
+    "effect": "destructive"
+  },
+  "delegate.operations.cancel": {
+    "permission": "authenticated",
+    "effect": "destructive"
+  },
+  "delegate.operations.get": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "delegate.operations.list": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "delegate.revoke": {
+    "permission": "authenticated",
+    "effect": "destructive"
+  },
+  "delegate.select_destination": {
+    "permission": "authenticated",
+    "effect": "destructive"
+  },
+  "delegate.status": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "downloads.add": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "downloads.add_torrent": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "downloads.add_torrent.preview": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "downloads.add.preview": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "downloads.classify": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "downloads.create_many": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "downloads.destination": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "downloads.folder.set": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "downloads.location": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "downloads.select_files": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "downloads.status": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "executor.control": {
+    "permission": "administrators",
+    "effect": "destructive"
+  },
+  "executor.status": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "gopeed.destination": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "gopeed.destination.preview": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "gopeed.folder": {
+    "permission": "administrators",
+    "effect": "write"
+  },
+  "gopeed.github.remove": {
+    "permission": "administrators",
+    "effect": "write"
+  },
+  "gopeed.github.set": {
+    "permission": "administrators",
+    "effect": "write"
+  },
+  "gopeed.github.status": {
+    "permission": "administrators",
+    "effect": "read"
+  },
+  "gopeed.pending": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "gopeed.plugins.catalog": {
+    "permission": "administrators",
+    "effect": "read"
+  },
+  "gopeed.plugins.check": {
+    "permission": "administrators",
+    "effect": "read"
+  },
+  "gopeed.plugins.delete": {
+    "permission": "administrators",
+    "effect": "destructive"
+  },
+  "gopeed.plugins.delete.preview": {
+    "permission": "administrators",
+    "effect": "read"
+  },
+  "gopeed.plugins.install": {
+    "permission": "administrators",
+    "effect": "write"
+  },
+  "gopeed.plugins.list": {
+    "permission": "administrators",
+    "effect": "read"
+  },
+  "gopeed.plugins.settings": {
+    "permission": "administrators",
+    "effect": "write"
+  },
+  "gopeed.plugins.settings.preview": {
+    "permission": "administrators",
+    "effect": "read"
+  },
+  "gopeed.plugins.switch": {
+    "permission": "administrators",
+    "effect": "write"
+  },
+  "gopeed.plugins.switch.preview": {
+    "permission": "administrators",
+    "effect": "read"
+  },
+  "gopeed.plugins.update": {
+    "permission": "administrators",
+    "effect": "write"
+  },
+  "gopeed.publish": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "gopeed.publish.preview": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "gopeed.request": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "gopeed.reveal": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "gopeed.session": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "gopeed.settings.get": {
+    "permission": "administrators",
+    "effect": "write"
+  },
+  "gopeed.settings.get.preview": {
+    "permission": "administrators",
+    "effect": "read"
+  },
+  "gopeed.settings.set": {
+    "permission": "administrators",
+    "effect": "write"
+  },
+  "gopeed.settings.set.preview": {
+    "permission": "administrators",
+    "effect": "read"
+  },
+  "media.cookies.delete": {
+    "permission": "authenticated",
+    "effect": "destructive"
+  },
+  "media.cookies.import": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "media.cookies.status": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "media.follows.add": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "media.follows.delete": {
+    "permission": "authenticated",
+    "effect": "destructive"
+  },
+  "media.rules.delete": {
+    "permission": "authenticated",
+    "effect": "destructive"
+  },
+  "media.rules.save": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "media.settings.get": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "media.settings.save": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "media.tools.check": {
+    "permission": "administrators",
+    "effect": "read"
+  },
+  "media.tools.rollback": {
+    "permission": "administrators",
+    "effect": "write"
+  },
+  "media.tools.status": {
+    "permission": "administrators",
+    "effect": "read"
+  },
+  "media.tools.update": {
+    "permission": "administrators",
+    "effect": "write"
+  },
+  "nas.files.create_folder": {
+    "permission": "authenticated",
+    "effect": "destructive"
+  },
+  "nas.files.download": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "nas.files.info": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "nas.files.list": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "nas.files.shares": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "nas.files.upload": {
+    "permission": "authenticated",
+    "effect": "destructive"
+  },
+  "nas.session.status": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "portal.register": {
+    "permission": "administrators",
+    "effect": "destructive"
+  },
+  "portal.status": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "portal.unregister": {
+    "permission": "administrators",
+    "effect": "destructive"
+  },
+  "root.run": {
+    "permission": "administrators",
+    "effect": "destructive"
+  },
+  "search.browser.cancel": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "search.browser.deliver": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "search.browser.download": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "search.browser.start": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "search.catalog": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.definitions.rollback": {
+    "permission": "administrators",
+    "effect": "write"
+  },
+  "search.definitions.rollback.preview": {
+    "permission": "administrators",
+    "effect": "read"
+  },
+  "search.definitions.update": {
+    "permission": "administrators",
+    "effect": "write"
+  },
+  "search.download": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "search.download.preview": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.jobs.cancel": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "search.jobs.cancel.preview": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.jobs.list": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.jobs.pages": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.jobs.result": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.jobs.start": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.jobs.status": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.jobs.wait": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.solver.get": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.solver.set": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "search.solver.set.preview": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.sources": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.sources.config": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.sources.delete": {
+    "permission": "authenticated",
+    "effect": "destructive"
+  },
+  "search.sources.delete.preview": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.sources.enabled": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "search.sources.enabled.preview": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.sources.export": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.sources.field": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "search.sources.field.preview": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.sources.list": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.sources.patch": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "search.sources.patch.preview": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.sources.save": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "search.sources.save.preview": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.sources.site": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "search.sources.test.start": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "tasks.delete": {
+    "permission": "authenticated",
+    "effect": "destructive"
+  },
+  "tasks.delete.preview": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "tasks.get": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "tasks.list": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "tasks.pause": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "tasks.pause.preview": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "tasks.removal": {
+    "permission": "authenticated",
+    "effect": "read"
+  },
+  "tasks.resume": {
+    "permission": "authenticated",
+    "effect": "write"
+  },
+  "tasks.resume.preview": {
+    "permission": "authenticated",
+    "effect": "read"
+  }
+}

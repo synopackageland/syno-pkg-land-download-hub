@@ -1,0 +1,11 @@
+{
+  "name": "coverage",
+  "author": "download-hub-fixture",
+  "title": "Download Hub management fixture",
+  "description": "Test-owned settings fixture with no download handlers or executable scripts",
+  "version": "1.0.0",
+  "scripts": [],
+  "settings": [
+    { "name": "userAgent", "title": "Fixture value", "type": "string", "value": "fixture-default" }
+  ]
+}

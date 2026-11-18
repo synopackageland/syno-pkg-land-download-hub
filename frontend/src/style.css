@@ -1,0 +1,309 @@
+/* The DSM window's mount element gives the app root its height. */
+.gopeed-root {
+  height: 100%;
+  min-height: 0;
+}
+
+/* Extensions › Recommended: a row of small cards, one per file host. */
+.gopeed-recommended {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--ui-space-3);
+}
+.gopeed-recommended-card {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-3);
+  min-width: 0;
+  padding: var(--ui-space-3);
+  border: 1px solid var(--ui-border-subtle);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface);
+}
+.gopeed-recommended-card img,
+.gopeed-recommended-glyph {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--ui-radius-sm);
+  object-fit: contain;
+}
+.gopeed-recommended-glyph {
+  display: grid;
+  place-items: center;
+  background: var(--ui-primary-soft);
+  color: var(--ui-primary);
+}
+.gopeed-recommended-title {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gopeed-recommended-line {
+  overflow: hidden;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-font-size-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gopeed-recommended-text {
+  flex: 1;
+  min-width: 0;
+}
+
+/* A page toolbar without tabs: its actions at the end of the line. */
+.gopeed-toolbar { display: flex; justify-content: flex-end; gap: var(--ui-space-2); }
+/* Downloads: one tab's list, with the task panel at its right. */
+.gopeed-dl-page { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.gopeed-summary {
+  color: var(--ui-text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.gopeed-filter { width: 180px; min-width: 0; flex: 0 1 180px; }
+.gopeed-dl {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  container-type: inline-size;
+}
+.gopeed-dl-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+.gopeed-dl-rows {
+  border: 1px solid var(--ui-border-subtle);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface);
+}
+.gopeed-dl-row {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--ui-space-3);
+  padding: var(--ui-space-2) var(--ui-space-3);
+  cursor: pointer;
+  outline: none;
+}
+.gopeed-dl-row + .gopeed-dl-row { border-top: 1px solid var(--ui-border-subtle); }
+.gopeed-dl-row:hover { background: var(--ui-surface-hover); }
+.gopeed-dl-row.is-selected { background: var(--ui-surface-selected); }
+.gopeed-dl-row:focus-visible { box-shadow: inset 0 0 0 2px var(--ui-focus-ring); }
+.gopeed-dl-main { display: grid; gap: 4px; min-width: 0; }
+.gopeed-dl-name {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* One line that ends in a single ellipsis when the row is narrow. */
+.gopeed-dl-meta {
+  display: block;
+  overflow: hidden;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-font-size-sm);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gopeed-dl-meta.is-failed { color: var(--ui-danger-text); }
+.gopeed-dl-dot { margin-inline: 6px; color: var(--ui-text-muted); }
+.gopeed-dl-actions { display: flex; align-items: center; gap: var(--ui-space-1); }
+/* The remove button shows on hover or focus; the row's main action stays. */
+.gopeed-dl-row .gopeed-dl-clear { opacity: 0; }
+.gopeed-dl-row:hover .gopeed-dl-clear,
+.gopeed-dl-row:focus-within .gopeed-dl-clear { opacity: 1; }
+.gopeed-dl-more { padding: var(--ui-space-2); border-top: 1px solid var(--ui-border-subtle); text-align: center; }
+
+/* File-type tiles: an icon on its kind's tint, with the extension. */
+.gopeed-dl-tile {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-blue-3);
+  color: var(--ui-blue-11);
+  line-height: 1;
+}
+.gopeed-dl-tile b { margin-top: 2px; font-size: 8px; font-weight: 700; letter-spacing: 0.02em; }
+.gopeed-dl-tile[data-kind="video"] { background: var(--ui-accent-3); color: var(--ui-accent-11); }
+.gopeed-dl-tile[data-kind="audio"] { background: var(--ui-orange-3); color: var(--ui-orange-11); }
+.gopeed-dl-tile[data-kind="image"] { background: var(--ui-green-3); color: var(--ui-green-11); }
+.gopeed-dl-tile[data-kind="doc"] { background: var(--ui-red-3); color: var(--ui-red-11); }
+.gopeed-dl-tile[data-kind="archive"],
+.gopeed-dl-tile[data-kind="disc"] { background: var(--ui-orange-2); color: var(--ui-orange-11); }
+.gopeed-dl-tile[data-kind="web"],
+.gopeed-dl-tile[data-kind="text"] { background: var(--ui-blue-2); color: var(--ui-blue-11); }
+.gopeed-dl-tile[data-kind="torrent"] { background: var(--ui-green-2); color: var(--ui-green-11); }
+
+/* The task panel: a right column; in a narrow window it covers the list. */
+.gopeed-panel {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: 340px;
+  min-height: 0;
+  margin-left: var(--ui-space-4);
+  border: 1px solid var(--ui-border-subtle);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface);
+}
+@container (max-width: 820px) {
+  .gopeed-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 2;
+    width: min(340px, 100%);
+    box-shadow: var(--ui-shadow-menu);
+  }
+}
+.gopeed-panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-3);
+  padding: var(--ui-space-3);
+  border-bottom: 1px solid var(--ui-border-subtle);
+}
+.gopeed-panel-title { flex: 1; min-width: 0; }
+.gopeed-panel-name { overflow-wrap: anywhere; font-weight: 600; }
+.gopeed-panel-sub { color: var(--ui-text-secondary); font-size: var(--ui-font-size-sm); }
+.gopeed-panel-body {
+  display: grid;
+  flex: 1;
+  align-content: start;
+  gap: var(--ui-space-3);
+  min-height: 0;
+  padding: var(--ui-space-3);
+  overflow: auto;
+}
+.gopeed-panel-progress { display: grid; gap: 6px; }
+.gopeed-panel-big { display: flex; align-items: baseline; gap: var(--ui-space-2); }
+.gopeed-panel-big b { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.gopeed-panel-meta { color: var(--ui-text-secondary); font-size: var(--ui-font-size-sm); font-variant-numeric: tabular-nums; }
+.gopeed-panel-error {
+  padding: var(--ui-space-2) var(--ui-space-3);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-danger-soft);
+  color: var(--ui-danger-text);
+}
+.gopeed-panel-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--ui-space-2); }
+.gopeed-panel-tiles[data-tiles="2"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.gopeed-panel-tile {
+  display: grid;
+  gap: 2px;
+  padding: var(--ui-space-2);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface-subtle);
+}
+.gopeed-panel-tile span { color: var(--ui-text-secondary); font-size: var(--ui-font-size-sm); }
+.gopeed-panel-tile b { overflow: hidden; font-weight: 600; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.gopeed-panel-card { padding: var(--ui-space-2) var(--ui-space-3); border: 1px solid var(--ui-border-subtle); border-radius: var(--ui-radius-md); }
+.gopeed-panel-cardhead {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-font-size-sm);
+}
+.gopeed-spark-fill { fill: var(--ui-blue-3); }
+.gopeed-spark-line { fill: none; stroke: var(--ui-primary); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.gopeed-panel-line { color: var(--ui-text-secondary); font-size: var(--ui-font-size-sm); }
+.gopeed-panel-kv {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px var(--ui-space-3);
+  margin: 0;
+}
+.gopeed-panel-kv dt { color: var(--ui-text-secondary); }
+.gopeed-panel-kv dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.gopeed-panel-files { display: grid; gap: var(--ui-space-2); }
+.gopeed-panel-apply { display: flex; justify-content: flex-end; }
+.gopeed-panel-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-2);
+  padding: var(--ui-space-3);
+  border-top: 1px solid var(--ui-border-subtle);
+}
+.gopeed-grow { flex: 1; }
+.gopeed-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ui-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* Preview */
+.gopeed-preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-2);
+  height: min(70vh, 640px);
+  min-height: 240px;
+}
+.gopeed-preview-tools { display: flex; justify-content: flex-end; }
+.gopeed-preview-image { flex: 1; min-height: 0; width: 100%; object-fit: contain; background: var(--ui-checkerboard); }
+.gopeed-preview-frame { flex: 1; width: 100%; min-height: 0; border: 1px solid var(--ui-border-subtle); border-radius: var(--ui-radius-sm); background: #fff; }
+.gopeed-preview-media { flex: 1; width: 100%; min-height: 0; background: #000; border-radius: var(--ui-radius-sm); }
+.gopeed-preview-audio { width: 100%; margin: auto 0; }
+.gopeed-preview-text {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: var(--ui-space-3);
+  overflow: auto;
+  border: 1px solid var(--ui-border-subtle);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-surface-subtle);
+  font: 12px/1.5 var(--ui-font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.gopeed-preview-note { margin: 0; color: var(--ui-text-secondary); font-size: var(--ui-font-size-sm); }
+.gopeed-sr {
+  /* Pinned to its containing block: at its static position, after a long
+     name, it would widen the scrolling tab panel on narrow windows. */
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Phone (narrow and touch) only: the list's rows and the task's sheet. */
+.gopeed-dl-list.is-phone .gopeed-dl-row {
+  min-height: var(--ui-list-row-height);
+  padding: var(--ui-space-2) var(--ui-space-1) var(--ui-space-2) var(--ui-space-3);
+}
+.gopeed-dl-list.is-phone .gopeed-dl-main { gap: 6px; }
+.gopeed-panel.is-sheet {
+  position: static;
+  width: auto;
+  margin: 0;
+  border: 0;
+  box-shadow: none;
+}
+.gopeed-panel.is-sheet .gopeed-panel-head,
+.gopeed-panel.is-sheet .gopeed-panel-body { padding-inline: 0; }
+.gopeed-panel.is-sheet .gopeed-panel-body { overflow: visible; }
+.gopeed-panel.is-sheet .gopeed-panel-foot {
+  position: sticky;
+  bottom: 0;
+  padding-inline: 0;
+  background: var(--ui-surface);
+}
+.gopeed-confirm-link { margin: 0; overflow-wrap: anywhere; font-family: var(--ui-font-mono); font-size: var(--ui-font-size-sm); }

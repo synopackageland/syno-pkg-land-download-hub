@@ -1,0 +1,7 @@
+--- a/pkg/cardigann/selector.go
++++ b/pkg/cardigann/selector.go
+@@ -62 +62,3 @@ func jsonPath(selector string) string {
+-	return jsonBracketIndex.ReplaceAllString(strings.TrimLeft(strings.TrimPrefix(selector, "$"), "."), ".$1")
++	// The index rewrite runs first: "$[0].id" becomes ".0.id", whose leading
++	// dot gjson reads as JSON Lines and matches nothing.
++	return strings.TrimLeft(jsonBracketIndex.ReplaceAllString(strings.TrimPrefix(selector, "$"), ".$1"), ".")

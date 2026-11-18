@@ -1,0 +1,16 @@
+.cache/
+build/
+dist/
+node_modules/
+ui/gopeed/
+third-party/gopeed/source/
+.env
+*.spk
+*.log
+frontend/node_modules/
+ui/app.js
+ui/app.module.js
+ui/chunks/
+ui/app.css
+ui/LICENSES/
+__pycache__/

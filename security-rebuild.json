@@ -1,0 +1,203 @@
+{
+  "package": "SynoPkgGopeed",
+  "version": "0.2.2-0052",
+  "toolchain": {
+    "cli": "0.26.0",
+    "templates": "0.26.1",
+    "sdk": "0.26.0",
+    "app": "0.26.0",
+    "ui": "0.14.5",
+    "executorTag": "executor/v0.24.0",
+    "goToolchain": "go1.26.10",
+    "searchHelperGoToolchain": "go1.27.3"
+  },
+  "check": {
+    "ok": true
+  },
+  "build": {
+    "ok": true
+  },
+  "inspect": {
+    "ok": true,
+    "findings": []
+  },
+  "nas_tested": false,
+  "manifest_sha256": "2a07d2a08ff51ef61e44c583abf31ad7efd44bd566bc5d3dc43f98f3659a8674",
+  "lock_sha256": {
+    "package-lock.json": "7d68e86c0cde04e51d82a344cb0f12f6d438013dac8d1829ab96a6eb14b1cb8e",
+    "frontend/package-lock.json": "abb61fad0f1041f348c80335b1f7b599038e765435124343502178529f059789",
+    "backend/go.sum": "c5a723e4c40370d594bb5048901f66d2b9536d99d797c520f561b228fdba796b"
+  },
+  "outputs": [
+    {
+      "file": "SynoPkgGopeed-0.2.2-0052-aarch64.spk",
+      "sha256": "2f90c44856ac2e3c4ca26d4c0acc829bdc5819abac8f89b0777a7f802d0808d0",
+      "size": 63890944,
+      "md5": "1b3449b485f4a1ff166b3fed230ef75f"
+    },
+    {
+      "file": "SynoPkgGopeed-0.2.2-0052-x86_64.spk",
+      "sha256": "9c9373650904fbb4c86972069a597f0a2c80bbac895ca3d228d2dcf3498f9f5b",
+      "size": 67591168,
+      "md5": "288d6ca6222d57a3a305187efbfac24b"
+    }
+  ],
+  "go_binaries": [
+    {
+      "arch": "aarch64",
+      "path": "background/worker",
+      "version": "go1.26.10",
+      "sha256": "16a9a24539bdef80ac0e9e66585e876a3a1f080449245416b86010c22722c967",
+      "upstream_unmodified": false
+    },
+    {
+      "arch": "aarch64",
+      "path": "daemon/control",
+      "version": "go1.26.10",
+      "sha256": "5def9bfdd2a167f1bc243d067d6a6b33fe6d4c3f11aefe82f389032fc6711cfb",
+      "upstream_unmodified": false
+    },
+    {
+      "arch": "aarch64",
+      "path": "executor/lifecycle",
+      "version": "go1.26.10",
+      "sha256": "a9ca1750d4d5cff4727dc29789e6eaf0a365cb0e674f1bb796971d82f2d4fa27",
+      "upstream_unmodified": false
+    },
+    {
+      "arch": "aarch64",
+      "path": "executor/executor",
+      "version": "go1.26.10",
+      "sha256": "8ef7c736203f6c111816b76f970b7204fa6f8d871ff3222fd7c0a27d0075b847",
+      "upstream_unmodified": false
+    },
+    {
+      "arch": "aarch64",
+      "path": "daemon/payload/bin/search-helper",
+      "version": "go1.27.3",
+      "sha256": "fdd8c10d5cc32c814661615850e94f7ddddaf815156d5bffd363af0847b9173d",
+      "upstream_unmodified": false
+    },
+    {
+      "arch": "aarch64",
+      "path": "daemon/payload/bin/gopeed",
+      "version": "go1.24.13",
+      "sha256": "3db88253d1e9cce884a52d861e4a44362322245c4aa82d12841ce367d13c42c3",
+      "upstream_unmodified": true
+    },
+    {
+      "arch": "aarch64",
+      "path": "daemon/payload/bin/engine",
+      "version": "go1.26.10",
+      "sha256": "ba8abf6d2c20398f935e2f414dc85d9aad211d5edb59245a101482e634e3e1a7",
+      "upstream_unmodified": false
+    },
+    {
+      "arch": "aarch64",
+      "path": "ui/cgi/api.cgi",
+      "version": "go1.26.10",
+      "sha256": "dc20245cb8bc1e8b2f83f33eaa8d335f15f5ad7688f7df15efd35239af2585e9",
+      "upstream_unmodified": false
+    },
+    {
+      "arch": "x86_64",
+      "path": "background/worker",
+      "version": "go1.26.10",
+      "sha256": "c6058480eae44b0b61aec9f419e9e3bc861b62048813193a70126513b3ed2865",
+      "upstream_unmodified": false
+    },
+    {
+      "arch": "x86_64",
+      "path": "daemon/control",
+      "version": "go1.26.10",
+      "sha256": "ac005f8e52938072850f824c61c57bc82ca5643eae4a2b01641ff082bc8df517",
+      "upstream_unmodified": false
+    },
+    {
+      "arch": "x86_64",
+      "path": "executor/lifecycle",
+      "version": "go1.26.10",
+      "sha256": "c6fbb377ecd5ec7ee5b96439f22091d9fa5965dfd616d510ca9445722f436721",
+      "upstream_unmodified": false
+    },
+    {
+      "arch": "x86_64",
+      "path": "executor/executor",
+      "version": "go1.26.10",
+      "sha256": "de78684faac211c24a7cda8a4541ab1b138d37f6d580936fe354bb9bd0d78a0f",
+      "upstream_unmodified": false
+    },
+    {
+      "arch": "x86_64",
+      "path": "daemon/payload/bin/search-helper",
+      "version": "go1.27.3",
+      "sha256": "0587ab67c2160332003727fc653de084cc4341485076e43a69fad54508b83b36",
+      "upstream_unmodified": false
+    },
+    {
+      "arch": "x86_64",
+      "path": "daemon/payload/bin/gopeed",
+      "version": "go1.24.13",
+      "sha256": "8a581d66d1420f9cd188a0cfe1324e26bbaf3270aa251e08158deb685066f208",
+      "upstream_unmodified": true
+    },
+    {
+      "arch": "x86_64",
+      "path": "daemon/payload/bin/engine",
+      "version": "go1.26.10",
+      "sha256": "acfacbbe4c90718e0b96a25495cfaea72d30adfc3b830d93c32ceb3e092fc058",
+      "upstream_unmodified": false
+    },
+    {
+      "arch": "x86_64",
+      "path": "ui/cgi/api.cgi",
+      "version": "go1.26.10",
+      "sha256": "84dd73dd3015ac30b4a460cf1be6278dc8caecb4c79b743ae1815f3bf35b1963",
+      "upstream_unmodified": false
+    }
+  ],
+  "approval": {
+    "aarch64": {
+      "retention": "eligible",
+      "permissions": "unchanged",
+      "executor_only": false,
+      "task_template_changed": false,
+      "old_policy_digest": "5813b91ede3fe96e318b5adca0059aefe4fe0a59c812e01bd3c566ec29031b87",
+      "new_policy_digest": "5813b91ede3fe96e318b5adca0059aefe4fe0a59c812e01bd3c566ec29031b87",
+      "root_programs": [],
+      "policy_changes": [],
+      "reason": "Approval can be retained if the installed protected runtime and exact DSM task readback still match this baseline."
+    },
+    "x86_64": {
+      "retention": "eligible",
+      "permissions": "unchanged",
+      "executor_only": false,
+      "task_template_changed": false,
+      "old_policy_digest": "5813b91ede3fe96e318b5adca0059aefe4fe0a59c812e01bd3c566ec29031b87",
+      "new_policy_digest": "5813b91ede3fe96e318b5adca0059aefe4fe0a59c812e01bd3c566ec29031b87",
+      "root_programs": [],
+      "policy_changes": [],
+      "reason": "Approval can be retained if the installed protected runtime and exact DSM task readback still match this baseline."
+    }
+  },
+  "validation": {
+    "typecheck": "passed",
+    "frontend_layout_tests": 38,
+    "webkit": {
+      "device": "iPhone 15",
+      "before": {
+        "innerWidth": 980,
+        "scrollWidth": 980
+      },
+      "innerWidth": 393,
+      "scrollWidth": 393,
+      "layoutMode": "mobile",
+      "viewport": "width=device-width, initial-scale=1",
+      "resize": {
+        "trustedDropped": 1,
+        "syntheticSeen": 1
+      },
+      "errors": []
+    }
+  }
+}

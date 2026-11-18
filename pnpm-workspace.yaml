@@ -1,0 +1,8 @@
+allowBuilds:
+  esbuild: true
+  koffi: true
+minimumReleaseAgeExclude:
+  - '@synopackageland/app@0.53.49'
+  - '@synopackageland/cli@0.54.6'
+  - '@synopackageland/sdk@0.53.49'
+  - '@synopackageland/templates@0.42.1 || 0.44.1'

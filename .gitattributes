@@ -1,0 +1,2 @@
+# Unified diff context retains the original file's blank lines.
+patches/*.patch whitespace=-blank-at-eol

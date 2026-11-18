@@ -1,0 +1,419 @@
+/*
+Copyright 2026 The Clustarr Authors.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+package torznab
+
+import (
+	"encoding/xml"
+	"io"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/mediactl/clustarr/pkg/newznab"
+)
+
+// Release is one search result item, with every wire attribute the client
+// needs as a typed field, plus a verbatim catch-all for the rest -- the
+// same split the research note's own §11 Release sketch uses. This is the
+// struct pkg/cardigann (Task B7) returns from its own Search.
+type Release struct {
+	Title       string
+	GUID        string
+	Link        string
+	CommentURL  string
+	PubDate     time.Time
+	Size        int64
+	Description string
+	Categories  []newznab.CategoryID
+
+	// torrent. DownloadVolumeFactor/UploadVolumeFactor/MinimumRatio are
+	// *float64, not a CLAUDE.md-banned type here: they are wire-protocol
+	// decimals carried verbatim from the indexer, not a human-typed config
+	// value, and this package never persists a Release to a CRD.
+	Seeders              *int32
+	Leechers             *int32
+	Peers                *int32
+	Grabs                *int32
+	Files                *int32
+	InfoHash             string
+	MagnetURL            string
+	DownloadVolumeFactor *float64
+	UploadVolumeFactor   *float64
+	MinimumRatio         *float64
+	MinimumSeedTime      *int64 // seconds
+
+	// Non-video (Newznab's music and book attrs, docs/research/indexers.md
+	// §4.3): the music-search and book-search answers name the work these
+	// four ways. Each keeps the FIRST value when an attr repeats; Attrs
+	// still holds every value verbatim.
+	Artist    string
+	Album     string
+	Author    string
+	Publisher string
+
+	// usenet (Newznab-native)
+	Group      string
+	Poster     string
+	UsenetDate *time.Time
+	Password   *int32
+	NFO        *int32
+	Info       string // nfo url
+
+	// IDs is keyed by commonv1alpha1.IDKeyIMDB/IDKeyTMDB/IDKeyTVDB, plus
+	// "tvmazeid" (no common.IDKey* constant exists for it). The IMDb value
+	// carries the canonical "tt" prefix.
+	IDs map[string]string
+
+	// Attrs holds every torznab:/newznab: attr verbatim (name -> all
+	// values, since e.g. category/tag/genre repeat), including ones with
+	// no typed field above (season, episode, genre, year, language, ...).
+	Attrs map[string][]string
+}
+
+// wireEnclosure mirrors an RSS <enclosure> element. Length is a string, not
+// an int64, for the same reason wireItem.Size is: encoding/xml aborts the
+// ENTIRE Decode -- not just this nested struct -- the moment an attribute
+// it is unmarshaling into a numeric Go field fails strconv parsing (see
+// wireItem's doc comment). Length is the last source of Release.Size (see
+// releaseSize), parsed there so a malformed value only loses that source.
+type wireEnclosure struct {
+	URL    string `xml:"url,attr"`
+	Length string `xml:"length,attr"`
+	Type   string `xml:"type,attr"`
+}
+
+// wireAttr matches BOTH <torznab:attr> and <newznab:attr> -- and any future
+// namespace variant such as cardigann-go's non-canonical
+// http://torznab.github.io/schemas/2015/feed -- because it keys off the
+// element's local name only, never its namespace URI or prefix.
+type wireAttr struct {
+	XMLName xml.Name
+	Name    string `xml:"name,attr"`
+	Value   string `xml:"value,attr"`
+}
+
+// wireItem mirrors a single <item> 1:1 (docs/research/indexers.md §4.2).
+//
+// Size and Categories are strings, not int64/[]int32: encoding/xml aborts
+// the ENTIRE Decode with an error the moment any element it is
+// unmarshaling into a numeric Go field fails strconv parsing, which would
+// turn one item's malformed <size> or <category> into a hard failure for
+// the whole feed (see
+// TestParseResultsMalformedNumericValueInOneItemDoesNotFailTheWholeFeed and
+// TestParseResultsMalformedCategoryInOneItemDoesNotFailTheWholeFeed).
+// Keeping them strings here and parsing them ourselves in newRelease lets a
+// bad value degrade -- Release.Size to 0, a bad <category> to simply being
+// skipped -- instead of failing the parse, the same graceful-degradation
+// contract every torznab:/newznab: attr already gets via parseInt32 etc.
+//
+// Grabs and Files are Jackett's: its ResultPage writes both as plain
+// elements, never as torznab:attr, so without them every Jackett release
+// lost both. They are fallbacks; an attr of the same name wins.
+type wireItem struct {
+	Title       string         `xml:"title"`
+	GUID        string         `xml:"guid"`
+	Link        string         `xml:"link"`
+	Comments    string         `xml:"comments"`
+	PubDate     string         `xml:"pubDate"`
+	Size        string         `xml:"size"`
+	Grabs       string         `xml:"grabs"`
+	Files       string         `xml:"files"`
+	Description string         `xml:"description"`
+	Categories  []string       `xml:"category"`
+	Enclosure   *wireEnclosure `xml:"enclosure"`
+	Extra       []wireAttr     `xml:",any"` // every element the named fields above don't claim
+}
+
+// wireFeed mirrors an <rss><channel> document.
+type wireFeed struct {
+	XMLName xml.Name `xml:"rss"`
+	Channel struct {
+		Item []wireItem `xml:"item"`
+	} `xml:"channel"`
+}
+
+// ParseItem parses a single <item> (used directly by table tests).
+func ParseItem(r io.Reader) (Release, error) {
+	var wi wireItem
+	if err := xml.NewDecoder(r).Decode(&wi); err != nil {
+		return Release{}, err
+	}
+	return newRelease(wi), nil
+}
+
+// ParseResults parses a whole <rss><channel> feed into its items.
+func ParseResults(r io.Reader) ([]Release, error) {
+	var wf wireFeed
+	if err := xml.NewDecoder(r).Decode(&wf); err != nil {
+		return nil, err
+	}
+
+	rels := make([]Release, 0, len(wf.Channel.Item))
+	for _, wi := range wf.Channel.Item {
+		rels = append(rels, newRelease(wi))
+	}
+	return rels, nil
+}
+
+func newRelease(w wireItem) Release {
+	rel := Release{
+		Title: w.Title, GUID: w.GUID, Link: w.Link, CommentURL: w.Comments,
+		Description: w.Description,
+		IDs:         map[string]string{}, Attrs: map[string][]string{},
+	}
+	// An unreadable pubDate leaves PubDate zero -- "no date", which
+	// app/indexer/worker/rss's projection already passes on as absent (and
+	// then falls back to usenetdate) -- rather than failing the item, let
+	// alone the feed. Sonarr's RssParser skips such an item; keeping it
+	// with no date loses nothing a skip would keep.
+	if t, ok := parseDate(w.PubDate); ok {
+		rel.PubDate = t
+	}
+	for _, c := range w.Categories {
+		// A non-numeric <category> (e.g. a slug like "tv/hd" some
+		// indexers emit instead of the numeric Newznab id) is skipped,
+		// not fatal; ParseInt's bitSize=32 also rejects an out-of-range
+		// value the same way it already does for every torznab:/newznab:
+		// attr parsed via parseInt32.
+		if id, err := strconv.ParseInt(c, 10, 32); err == nil {
+			rel.addCategoryIfAbsent(newznab.CategoryID(id))
+		}
+	}
+	if w.Enclosure != nil && rel.Link == "" {
+		rel.Link = w.Enclosure.URL
+	}
+	for _, a := range w.Extra {
+		if a.XMLName.Local != "attr" {
+			continue // e.g. a foreign atom:link element; not an attr
+		}
+		rel.Attrs[a.Name] = append(rel.Attrs[a.Name], a.Value)
+		applyAttr(&rel, a.Name, a.Value)
+	}
+	rel.Size = releaseSize(w, rel.Attrs["size"])
+	if rel.Grabs == nil {
+		rel.Grabs = parseInt32(strings.TrimSpace(w.Grabs))
+	}
+	if rel.Files == nil {
+		rel.Files = parseInt32(strings.TrimSpace(w.Files))
+	}
+	if len(rel.IDs) == 0 {
+		rel.IDs = nil
+	}
+	if len(rel.Attrs) == 0 {
+		rel.Attrs = nil
+	}
+	return rel
+}
+
+// releaseSize picks an item's size in bytes from, in order: the
+// torznab:/newznab: "size" attr, the <size> element, and the enclosure's
+// length. The attr-then-enclosure order is Sonarr's and Prowlarr's
+// NewznabRssParser/TorznabRssParser.GetSize, and the attr is the one the
+// Torznab spec makes mandatory (docs/research/indexers.md §4.3); Sonarr
+// reads no <size> element at all, but Jackett and Prowlarr both write one
+// equal to their enclosure length, so it sits between the two. Newznab
+// indexers such as nzbgeek send no <size>, only the attr and the
+// enclosure, which is why reading <size> alone left every usenet release
+// at 0 bytes. A value that does not parse (a humanized "12.5GB") or is not
+// positive says nothing and the next source is asked; 0 means unknown,
+// which pkg/decision exempts from size limits.
+func releaseSize(w wireItem, attrs []string) int64 {
+	candidates := append([]string{}, attrs...)
+	candidates = append(candidates, w.Size)
+	if w.Enclosure != nil {
+		candidates = append(candidates, w.Enclosure.Length)
+	}
+	for _, c := range candidates {
+		if v, err := strconv.ParseInt(strings.TrimSpace(c), 10, 64); err == nil && v > 0 {
+			return v
+		}
+	}
+	return 0
+}
+
+// dateLayouts are the pubDate/usenetdate shapes indexers emit. Go's "2"
+// reads a one- or two-digit day, and a fractional second after the seconds
+// is accepted without a layout of its own.
+var dateLayouts = []string{
+	"Mon, 2 Jan 2006 15:04:05 -0700",  // RFC 1123Z / RFC 2822: Newznab, Jackett
+	"Mon, 2 Jan 2006 15:04:05 -07:00", // .NET "zzz" left with its colon
+	"Mon, 2 Jan 2006 15:04:05 MST",    // RFC 1123 and .NET "r" ("GMT")
+	"Mon, 2 Jan 2006 15:04:05",
+	"Mon, 2 Jan 06 15:04:05 -0700",
+	"Mon, 2 Jan 06 15:04:05 MST",
+	"2 Jan 2006 15:04:05 -0700",
+	"2 Jan 2006 15:04:05 MST",
+	"2 Jan 2006 15:04:05",
+	"2 Jan 06 15:04 -0700", // RFC 822Z
+	"2 Jan 06 15:04 MST",   // RFC 822
+	time.RFC3339,
+	"2006-01-02 15:04:05",
+}
+
+// trailingZoneName is Sonarr's XElementExtensions.RemoveTimeZoneRegex: a
+// trailing zone abbreviation Go's "MST" will not read (it needs three
+// letters, so RFC 822's "UT" fails) is stripped and the rest read as UTC.
+var trailingZoneName = regexp.MustCompile(`\s[A-Z]{2,4}$`)
+
+// parseDate reads s as any of dateLayouts, false when none fits (or s is
+// blank). It follows Sonarr's XElementExtensions.ParseDate: a date with no
+// zone, or a zone abbreviation with no fixed meaning ("EST", "PDT"), is
+// read as UTC (AssumeUniversal) -- parsing in time.UTC rather than the
+// host's zone keeps that independent of where the pod runs. The result is
+// in time.UTC, so two parses of one instant -- as WriteResults' round trip
+// produces -- are reflect.DeepEqual, not just Equal(): they share the
+// single time.UTC *Location instead of two structurally separate zones
+// that both mean "+0000".
+func parseDate(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
+	}
+	for _, candidate := range []string{s, trailingZoneName.ReplaceAllString(s, "")} {
+		for _, layout := range dateLayouts {
+			if t, err := time.ParseInLocation(layout, candidate, time.UTC); err == nil {
+				return t.UTC(), true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+// applyAttr maps one torznab:/newznab: attr onto rel's typed fields. Names
+// with no typed field above only land in rel.Attrs (already handled by the
+// caller before applyAttr runs). A malformed numeric value is dropped
+// silently rather than failing the whole parse -- the raw string is still
+// preserved verbatim in rel.Attrs.
+func applyAttr(rel *Release, name, value string) {
+	switch name {
+	case "seeders":
+		rel.Seeders = parseInt32(value)
+	case "leechers":
+		rel.Leechers = parseInt32(value)
+	case "peers":
+		rel.Peers = parseInt32(value)
+	case "grabs":
+		rel.Grabs = parseInt32(value)
+	case "files":
+		rel.Files = parseInt32(value)
+	case "infohash":
+		rel.InfoHash = value
+	case "magneturl":
+		rel.MagnetURL = value
+	case "downloadvolumefactor":
+		rel.DownloadVolumeFactor = parseFloat64(value)
+	case "uploadvolumefactor":
+		rel.UploadVolumeFactor = parseFloat64(value)
+	case "minimumratio":
+		rel.MinimumRatio = parseFloat64(value)
+	case "minimumseedtime":
+		rel.MinimumSeedTime = parseInt64(value)
+	case "imdbid":
+		rel.IDs["imdb"] = value // already "tt"-prefixed
+	case "imdb":
+		if _, ok := rel.IDs["imdb"]; !ok {
+			rel.IDs["imdb"] = "tt" + zeroPad(value, 7)
+		}
+	case "tmdbid":
+		rel.IDs["tmdb"] = value
+	case "tvdbid":
+		rel.IDs["tvdb"] = value
+	case "tvmazeid":
+		rel.IDs["tvmazeid"] = value
+	case "category":
+		if id, err := strconv.ParseInt(value, 10, 32); err == nil {
+			rel.addCategoryIfAbsent(newznab.CategoryID(id))
+		}
+	case "artist":
+		setOnce(&rel.Artist, value)
+	case "album":
+		setOnce(&rel.Album, value)
+	case "author":
+		setOnce(&rel.Author, value)
+	case "publisher":
+		setOnce(&rel.Publisher, value)
+	case "group":
+		rel.Group = value
+	case "poster":
+		rel.Poster = value
+	case "info":
+		rel.Info = value
+	case "usenetdate":
+		if t, ok := parseDate(value); ok {
+			rel.UsenetDate = &t
+		}
+	case "password":
+		rel.Password = parseInt32(value)
+	case "nfo":
+		rel.NFO = parseInt32(value)
+	}
+}
+
+// setOnce assigns value to *field unless it already holds one, so a
+// repeated attr keeps its first value on the typed field.
+func setOnce(field *string, value string) {
+	if *field == "" {
+		*field = value
+	}
+}
+
+// addCategoryIfAbsent appends id to rel.Categories unless it is already
+// present, so a torznab:attr category entry that duplicates the base
+// <category> element (see search_with_attrs.xml) does not double up.
+func (rel *Release) addCategoryIfAbsent(id newznab.CategoryID) {
+	for _, existing := range rel.Categories {
+		if existing == id {
+			return
+		}
+	}
+	rel.Categories = append(rel.Categories, id)
+}
+
+func parseInt32(s string) *int32 {
+	v, err := strconv.ParseInt(s, 10, 32)
+	if err != nil {
+		return nil
+	}
+	v32 := int32(v)
+	return &v32
+}
+
+func parseInt64(s string) *int64 {
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return nil
+	}
+	return &v
+}
+
+func parseFloat64(s string) *float64 {
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return nil
+	}
+	return &v
+}
+
+// zeroPad left-pads s with '0' to width n.
+func zeroPad(s string, n int) string {
+	for len(s) < n {
+		s = "0" + s
+	}
+	return s
+}
