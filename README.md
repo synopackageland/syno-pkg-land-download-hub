@@ -79,6 +79,17 @@ check/build, and inspects both architecture SPKs in `dist/`. See
 [build inputs and validation boundaries](docs/validation.md) for catalog setup.
 After editing `operations.json`, run `pnpm run ctl:generate`.
 
+Each release also publishes the GPL corresponding source. From a clean checkout
+at the release tag, build those archives (upstream Gopeed source, its vendored
+Go modules, and this repository with vendored modules) into a folder:
+
+```sh
+python3 scripts/gpl_sources.py dist/source
+```
+
+The archives are reproducible, so their SHA-256 sums can be checked
+against the release assets.
+
 See [media downloads](docs/media-downloads.md),
 [BT and multi-file publication](docs/bt-and-multi-file.md),
 [settings and runtime boundaries](docs/settings-inventory.md),
