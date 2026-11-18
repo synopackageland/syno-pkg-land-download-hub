@@ -173,14 +173,14 @@ importers:
         specifier: 0.14.0
         version: 0.14.0(e2e@0.19.0(@ai-sdk/openai@4.0.91(zod@4.6.7))(ai@7.0.137(zod@4.6.7)))
       '@synopackageland/app':
-        specifier: 0.53.49
-        version: 0.53.49
+        specifier: 0.53.52
+        version: 0.53.52
       '@synopackageland/cli':
         specifier: ~0.54.6
         version: 0.54.6(@ai-sdk/openai@4.0.91(zod@4.6.7))(@e2e-dev/web@0.14.0(e2e@0.19.0(@ai-sdk/openai@4.0.91(zod@4.6.7))(ai@7.0.137(zod@4.6.7))))(ai@7.0.137(zod@4.6.7))(e2e@0.19.0(@ai-sdk/openai@4.0.91(zod@4.6.7))(ai@7.0.137(zod@4.6.7)))
       '@synopackageland/sdk':
-        specifier: 0.53.49
-        version: 0.53.49(vue@3.5.45)
+        specifier: 0.53.52
+        version: 0.53.52(vue@3.5.45)
       '@synopackageland/templates':
         specifier: 0.42.1
         version: 0.42.1
@@ -879,8 +879,8 @@ packages:
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
 
-  '@synopackageland/app@0.53.49':
-    resolution: {integrity: sha512-7+ojLE5iEjudOtTkTEIXyOYPlJGWdtz+6qp9iYVJyc09Kn1Wcuz6iGh+OWWIj92ilsc8pQ2Y3B5Tt4ZoURoBCQ==}
+  '@synopackageland/app@0.53.52':
+    resolution: {integrity: sha512-w+uoguKKVK1KeSvdfqGFtHhXzlslCygSA5yChodLH9kmNCk7wRawmXMCAWWehnzdr2HiGRC40Q5CU3SUNb+aCg==}
     engines: {node: '>=22'}
 
   '@synopackageland/cli@0.54.6':
@@ -902,8 +902,8 @@ packages:
       e2e:
         optional: true
 
-  '@synopackageland/sdk@0.53.49':
-    resolution: {integrity: sha512-sfnOC+e0twyspamRqNgYCYhN2wtt8cd1CZ89tvLDkxmvMd7zdqMiP9GedcBCu2L27R0FC43f+hRNVPEEFN+BYQ==}
+  '@synopackageland/sdk@0.53.52':
+    resolution: {integrity: sha512-P7QAXnlHkRIyHQn0MF0EymXea2q79FbZdR3pAmF/ga+3gKEEqDV37yiygg5Fayij8syfT11TexIVR+1xvMdv6Q==}
     peerDependencies:
       '@lucide/vue': ^1.48.0
       '@synopackageland/ui': '>=0.23.5 <0.26.0'
@@ -1604,7 +1604,7 @@ snapshots:
 
   '@standard-schema/spec@1.1.0': {}
 
-  '@synopackageland/app@0.53.49': {}
+  '@synopackageland/app@0.53.52': {}
 
   '@synopackageland/cli@0.54.6(@ai-sdk/openai@4.0.91(zod@4.6.7))(@e2e-dev/web@0.14.0(e2e@0.19.0(@ai-sdk/openai@4.0.91(zod@4.6.7))(ai@7.0.137(zod@4.6.7))))(ai@7.0.137(zod@4.6.7))(e2e@0.19.0(@ai-sdk/openai@4.0.91(zod@4.6.7))(ai@7.0.137(zod@4.6.7)))':
     dependencies:
@@ -1625,7 +1625,7 @@ snapshots:
       ai: 7.0.137(zod@4.6.7)
       e2e: 0.19.0(@ai-sdk/openai@4.0.91(zod@4.6.7))(ai@7.0.137(zod@4.6.7))
 
-  '@synopackageland/sdk@0.53.49(vue@3.5.45)':
+  '@synopackageland/sdk@0.53.52(vue@3.5.45)':
     dependencies:
       vue: 3.5.45
 

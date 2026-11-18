@@ -1,10 +1,10 @@
 {
   "cli": "0.54.6",
   "templates": "0.42.1",
-  "sdk": "0.53.49",
-  "frontendSdk": "0.53.49",
-  "app": "0.53.49",
-  "ui": "0.25.29",
+  "sdk": "0.53.52",
+  "frontendSdk": "0.53.52",
+  "app": "0.53.52",
+  "ui": "0.25.30",
   "executorTag": "executor/v0.53.6",
   "goToolchain": "go1.26.10",
   "searchHelperGoToolchain": "go1.27.3"

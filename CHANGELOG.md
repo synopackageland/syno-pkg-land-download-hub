@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2-0116 — Updated UI kit and SDK
+
+- Updated to the latest UI kit and SDK; features are unchanged
+- UI at ~0.25.30, SDK/App and the Go module at 0.53.52; CLI unchanged at ~0.54.6, executor at 0.53.6 and templates at 0.42.1
+
 ## 0.2.2-0115 — Built from the public repository
 
 - Built from the public source repository; features are unchanged

@@ -26,7 +26,7 @@ class SDKMigrationTests(unittest.TestCase):
 
     def test_sdk_comes_from_the_public_registries(self):
         # Published packages retain exact lockfile pins; CLI and UI follow patch releases.
-        for directory, package, version in [(ROOT, '@synopackageland/sdk', '0.53.49'), (ROOT, '@synopackageland/app', '0.53.49'), (ROOT, '@synopackageland/cli', '0.54.6'), (ROOT, '@synopackageland/templates', '0.42.1'), (ROOT/'frontend', '@synopackageland/sdk', '0.53.49'), (ROOT/'frontend', '@synopackageland/ui', '0.25.29')]:
+        for directory, package, version in [(ROOT, '@synopackageland/sdk', '0.53.52'), (ROOT, '@synopackageland/app', '0.53.52'), (ROOT, '@synopackageland/cli', '0.54.6'), (ROOT, '@synopackageland/templates', '0.42.1'), (ROOT/'frontend', '@synopackageland/sdk', '0.53.52'), (ROOT/'frontend', '@synopackageland/ui', '0.25.30')]:
             manifest = json.loads((directory/'package.json').read_text())
             lock = project_lock(directory/'pnpm-lock.yaml')
             declared = dict(manifest.get('dependencies', {}), **manifest.get('devDependencies', {}))
@@ -39,7 +39,7 @@ class SDKMigrationTests(unittest.TestCase):
             resolution = lock['packages'][f'{package}@{version}']['resolution']
             self.assertEqual(set(resolution), {'integrity'})
         gomod = (ROOT/'backend/go.mod').read_text()
-        self.assertIn('github.com/synopackageland/syno-pkg-land-sdk v0.53.49', gomod)
+        self.assertIn('github.com/synopackageland/syno-pkg-land-sdk v0.53.52', gomod)
         # The released SDK module comes straight from the public module proxy,
         # pinned by go.sum: no replacement, local checkout or source patch.
         self.assertEqual([line for line in gomod.splitlines() if line.startswith('replace ')], [])
