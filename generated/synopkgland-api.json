@@ -4,7 +4,7 @@
   "payload": {
     "package": {
       "id": "SynoPkgGopeed",
-      "version": "0.2.2-0115",
+      "version": "0.2.2-0116",
       "displayName": "Download Hub"
     },
     "aliases": [
@@ -13921,5 +13921,5 @@
       }
     }
   },
-  "sha256": "5311859e68ace0950f21510f2899fd76bb91663c44008addc87d8b3a74888a36"
+  "sha256": "fdde71e7f0827950b6c5d29f4a516aa07d7c1c7f8b540b9bf14955ac1d43dbc2"
 }

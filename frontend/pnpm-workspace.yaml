@@ -1,5 +1,5 @@
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:
-  - '@synopackageland/sdk@0.53.49'
-  - '@synopackageland/ui@0.25.29'
+  - '@synopackageland/sdk@0.53.52'
+  - '@synopackageland/ui@0.25.30'

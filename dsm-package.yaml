@@ -7,7 +7,7 @@ schema: 2
 package: SynoPkgGopeed
 version: 0.2.2
 # Increase for every SPK you hand out with the same version (INFO 0.1.0-0001).
-build: 115
+build: 116
 displayname: Download Hub
 entry: app-privilege
 # Package Center and DSM window icons: upstream Gopeed's logo, rendered by
